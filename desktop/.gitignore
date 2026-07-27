@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+data/received/
+data/outbox/
+*.log
+.DS_Store

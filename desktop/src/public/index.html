@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>局域网互传工具 · local-sharing</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⇄</span>
+      <div>
+        <h1>局域网互传工具</h1>
+        <p class="sub">local-sharing · 电脑端</p>
+      </div>
+    </div>
+    <div class="conn" id="connState"><span class="dot off"></span> 连接中…</div>
+  </header>
+
+  <main class="grid">
+    <!-- 连接卡片 -->
+    <section class="card connect">
+      <h2>连接方式</h2>
+      <div class="qr-wrap">
+        <img id="qr" alt="二维码" />
+      </div>
+      <p class="hint">手机/平板扫描二维码，或在 App 中输入下方地址：</p>
+      <code id="connectUrl" class="url">—</code>
+      <p class="devname">本机名称：<b id="devName">—</b></p>
+    </section>
+
+    <!-- 设备列表 -->
+    <section class="card devices">
+      <h2>已连接设备 <span id="devCount" class="badge">0</span></h2>
+      <ul id="deviceList" class="list">
+        <li class="empty">暂无设备连接</li>
+      </ul>
+    </section>
+
+    <!-- 发送面板 -->
+    <section class="card send">
+      <h2>发送到设备</h2>
+      <label class="field">
+        <span>选择设备</span>
+        <select id="targetDevice"><option value="">— 请选择 —</option></select>
+      </label>
+      <div class="file-actions">
+        <label class="btn file">
+          选择文件
+          <input type="file" id="fileInput" multiple hidden />
+        </label>
+        <label class="btn file">
+          选择文件夹
+          <input type="file" id="folderInput" webkitdirectory multiple hidden />
+        </label>
+      </div>
+      <ul id="pickList" class="list small"></ul>
+      <button id="sendBtn" class="btn primary" disabled>发送</button>
+      <div id="sendLog" class="log"></div>
+    </section>
+
+    <!-- 接收列表 -->
+    <section class="card received">
+      <h2>收到的文件</h2>
+      <ul id="receivedList" class="list">
+        <li class="empty">还没有收到文件</li>
+      </ul>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>
