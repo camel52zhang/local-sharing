@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.Button
@@ -126,7 +126,7 @@ fun HomeScreen(vm: ShareViewModel) {
                         if (selected.isEmpty()) {
                             Text("尚未选择文件", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         } else {
-                            itemsIndexed(selected) { idx, item ->
+                            selected.forEachIndexed { idx, item ->
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
                                         imageVector = if (item.isFolder) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
@@ -140,6 +140,7 @@ fun HomeScreen(vm: ShareViewModel) {
                                         Text("✕")
                                     }
                                 }
+                                Spacer(Modifier.height(8.dp))
                             }
                             Spacer(Modifier.height(12.dp))
                             Button(

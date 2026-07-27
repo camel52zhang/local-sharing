@@ -53,7 +53,7 @@ fun ScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                         .also {
-                            it.setAnalyzer(ContextCompat.mainExecutor(ctx)) { imageProxy ->
+                            it.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
                                 processImage(imageProxy, scanner) { value ->
                                     if (scanned.compareAndSet(false, true)) onResult(value)
                                 }
@@ -70,7 +70,7 @@ fun ScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
                     } catch (e: Exception) {
                         Log.e(TAG, "camera bind failed: ${e.message}")
                     }
-                }, ContextCompat.mainExecutor(ctx))
+                }, ContextCompat.getMainExecutor(ctx))
                 previewView
             },
         )

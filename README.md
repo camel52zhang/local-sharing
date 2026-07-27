@@ -1,6 +1,6 @@
 # 局域网互传工具 · local-sharing
 
-> 一款运行在局域网内的文件/文件夹互传工具：手机/平板扫码或输入电脑 IP 即可连接电脑，
+> 一款运行在局域网内的文件/文件夹互传工具：手机/平板扫码或输入电脑 IP 即可连接电脑，  
 > 双向互传文件与文件夹，无需公网、无需注册、无需云。
 
 - **中文名**：局域网互传工具
@@ -10,7 +10,7 @@
 
 ## ✨ 功能特性
 
-1. **手机 → 电脑**：局域网内手机拍的照片、编辑的文件、文件夹，扫码或输入电脑 IP 连接后，
+1. **手机 → 电脑**：局域网内手机拍的照片、编辑的文件、文件夹，扫码或输入电脑 IP 连接后，  
    直接发送到电脑（自动按设备归类存放）。
 2. **电脑 → 手机/平板**：电脑端选择文件或文件夹，推送到已连接的手机/平板，手机端实时收到并保存。
 3. **双向文件夹传输**：文件夹在发送端自动打包为 zip，接收端自动解压还原目录结构。
@@ -89,6 +89,7 @@ npm run build && npm start
 ```
 
 启动后在浏览器打开 `http://localhost:<PORT>`，界面会显示：
+
 - 本机局域网地址与二维码
 - 已连接设备列表
 - 收到的文件
@@ -98,14 +99,14 @@ npm run build && npm start
 
 环境变量（`.env`）：
 
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `PORT` | 8080 | 监听端口 |
-| `HOST` | 0.0.0.0 | 绑定地址 |
-| `DEVICE_NAME` | My Computer | 电脑显示名 |
-| `SHARE_CODE` | 空 | 可选共享码 |
-| `MAX_FILE_SIZE` | 2GB | 单文件上限 |
-| `DATA_DIR` | ./data | 数据存储目录 |
+| 变量              | 默认          | 说明     |
+| --------------- | ----------- | ------ |
+| `PORT`          | 8080        | 监听端口   |
+| `HOST`          | 0.0.0.0     | 绑定地址   |
+| `DEVICE_NAME`   | My Computer | 电脑显示名  |
+| `SHARE_CODE`    | 空           | 可选共享码  |
+| `MAX_FILE_SIZE` | 2GB         | 单文件上限  |
+| `DATA_DIR`      | ./data      | 数据存储目录 |
 
 ---
 
@@ -119,6 +120,7 @@ npm run build && npm start
 4. `Build / Make Project`，或 `Run` 到设备/模拟器。
 
 权限说明：
+
 - `INTERNET`：局域网通信（HTTP，已开启 `usesCleartextTraffic`）。
 - `CAMERA`：扫码连接（运行时申请）。
 - 接收文件写入 App 私有下载目录（`getExternalFilesDir`），无需存储权限。
@@ -127,18 +129,18 @@ npm run build && npm start
 
 ## 🔌 API 契约
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET  | `/health` | 健康检查 |
-| GET  | `/api/info` | 连接信息（名称/IP/端口/是否需共享码） |
-| GET  | `/api/qr` | 连接地址的二维码 PNG |
-| POST | `/api/devices` | 设备注册，返回 `deviceId / token / wsUrl` |
-| GET  | `/api/devices` | 已注册设备列表（电脑仪表盘用） |
-| GET  | `/api/received` | 收到的文件列表 |
-| POST | `/api/upload` | 手机→电脑上传（需 `x-device-id` + `x-token` 头） |
-| POST | `/api/transfer/out` | 电脑→手机推送（multipart + `deviceId`） |
-| GET  | `/api/transfer/:id` | 手机拉取推送文件 |
-| POST | `/api/transfer/:id/ack` | 手机确认接收完成 |
+| 方法   | 路径                      | 说明                                     |
+| ---- | ----------------------- | -------------------------------------- |
+| GET  | `/health`               | 健康检查                                   |
+| GET  | `/api/info`             | 连接信息（名称/IP/端口/是否需共享码）                  |
+| GET  | `/api/qr`               | 连接地址的二维码 PNG                           |
+| POST | `/api/devices`          | 设备注册，返回 `deviceId / token / wsUrl`     |
+| GET  | `/api/devices`          | 已注册设备列表（电脑仪表盘用）                        |
+| GET  | `/api/received`         | 收到的文件列表                                |
+| POST | `/api/upload`           | 手机→电脑上传（需 `x-device-id` + `x-token` 头） |
+| POST | `/api/transfer/out`     | 电脑→手机推送（multipart + `deviceId`）        |
+| GET  | `/api/transfer/:id`     | 手机拉取推送文件                               |
+| POST | `/api/transfer/:id/ack` | 手机确认接收完成                               |
 
 WebSocket：`/ws?token=<deviceToken>`（设备）或 `/ws?role=pc`（电脑仪表盘实时更新）。
 
@@ -154,11 +156,11 @@ WebSocket：`/ws?token=<deviceToken>`（设备）或 `/ws?role=pc`（电脑仪�
 
 ## 🗺 后续计划
 
-- [ ] 传输进度实时显示（电脑仪表盘侧）
-- [ ] 多设备同时推送、批量确认
-- [ ] 电脑端 Electron 打包为独立桌面应用
-- [ ] 端到端加密（DTLS / 预共享密钥）
-- [ ] 断点续传
+- [x] 传输进度实时显示（电脑仪表盘侧）
+- [x] 多设备同时推送、批量确认
+- [x] 电脑端 Electron 打包为独立桌面应用
+- [x] 端到端加密（DTLS / 预共享密钥）
+- [x] 断点续传
 
 ---
 

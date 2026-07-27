@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -144,7 +145,7 @@ class UriRequestBody(
     private val declaredSize: Long,
     private val onProgress: (Long, Long) -> Unit,
 ) : RequestBody() {
-    override fun contentType(): MediaType? = MediaType.parse("application/octet-stream")
+    override fun contentType(): MediaType? = "application/octet-stream".toMediaType()
     override fun contentLength(): Long = declaredSize
 
     override fun writeTo(sink: BufferedSink) {
