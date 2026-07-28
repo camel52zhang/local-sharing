@@ -5,14 +5,19 @@ import * as path from 'path';
 import archiver from 'archiver';
 import { config, paths } from '../config';
 import {
+  ActivityItem,
   Device,
   DeviceType,
   ReceivedFile,
   Transfer,
+  TransferStatus,
 } from '../types';
 
 /** 服务层向实时层广播事件的轻量总线 */
 export const bus = new EventEmitter();
+
+/** PC→手机 发送后、ACK 超时阈值（毫秒）。超时未确认则标记为失败。 */
+const ACK_TIMEOUT_MS = 60_000;
 
 function id(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
@@ -26,6 +31,8 @@ function token(): string {
 const devices = new Map<string, Device>();
 const transfers = new Map<string, Transfer>();
 const received: ReceivedFile[] = [];
+/** 发送历史（独立于会被清理的 transfers，用于活动流展示，保留状态） */
+const outgoing: Transfer[] = [];
 
 export function registerDevice(name: string, type: DeviceType): Device {
   const device: Device = {
@@ -65,8 +72,71 @@ export function listDevices(): Device[] {
   return [...devices.values()];
 }
 
+/** 设备类型 → 展示图标（前端据此映射） */
+export function deviceIcon(type: DeviceType): string {
+  switch (type) {
+    case 'phone':
+      return 'phone';
+    case 'tablet':
+      return 'tablet';
+    case 'pc':
+      return 'pc';
+    default:
+      return 'device';
+  }
+}
+
 export function listReceived(): ReceivedFile[] {
   return received.slice().reverse();
+}
+
+/** 合并“收到的文件(in)”与“发送历史(out)”，按时间倒序，供活动流展示 */
+export function listActivity(): ActivityItem[] {
+  const items: ActivityItem[] = [];
+  for (const f of received) {
+    items.push({
+      id: f.id,
+      direction: 'in',
+      name: f.name,
+      size: f.size,
+      kind: f.kind,
+      deviceName: f.fromDeviceName,
+      status: 'completed',
+      time: f.receivedAt,
+    });
+  }
+  for (const t of outgoing) {
+    items.push({
+      id: t.id,
+      direction: 'out',
+      name: t.name,
+      size: t.size,
+      kind: t.kind,
+      deviceName: '本机',
+      status: t.status,
+      time: t.createdAt,
+    });
+  }
+  items.sort((a, b) => b.time - a.time);
+  return items;
+}
+
+/** 删除单条“收到的文件”记录（同时删除磁盘文件，缺失则忽略） */
+export function removeReceived(fileId: string): boolean {
+  const idx = received.findIndex((f) => f.id === fileId);
+  if (idx < 0) return false;
+  const f = received[idx];
+  safeUnlink(f.savedPath);
+  received.splice(idx, 1);
+  bus.emit('received-removed', { fileId });
+  return true;
+}
+
+/** 清空“收到的文件”记录与磁盘文件 */
+export function clearReceived(): void {
+  for (const f of received) safeUnlink(f.savedPath);
+  received.length = 0;
+  bus.emit('received-removed', { fileId: '*' });
 }
 
 function emitDeviceList(): void {
@@ -168,8 +238,22 @@ export async function finalizeOutgoing(
     createdAt: Date.now(),
   };
   transfers.set(transferId, transfer);
+  // 记录到发送历史（与 transfers 同一引用，状态变更会同步）
+  outgoing.push(transfer);
 
   bus.emit('incoming', { deviceId, transfer });
+
+  // ACK 超时：手机未在阈值内确认接收则标记为失败并清理临时文件
+  setTimeout(() => {
+    const t = transfers.get(transferId);
+    if (t && t.status === 'ready') {
+      t.status = 'failed';
+      safeUnlink(t.filePath);
+      transfers.delete(transferId);
+      bus.emit('transfer-failed', { transferId });
+    }
+  }, ACK_TIMEOUT_MS).unref();
+
   return transfer;
 }
 

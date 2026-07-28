@@ -11,8 +11,12 @@ import {
   getDevice,
   authenticate,
   listDevices,
+  deviceIcon,
   listReceived,
+  listActivity,
   recordReceived,
+  removeReceived,
+  clearReceived,
   finalizeOutgoing,
   getTransfer,
   completeTransfer,
@@ -113,6 +117,7 @@ export function buildApp(): express.Express {
         name: d.name,
         type: d.type,
         online: !!d.ws,
+        icon: deviceIcon(d.type),
       })),
     });
   });
@@ -120,6 +125,24 @@ export function buildApp(): express.Express {
   // ---- 接收文件列表 ----
   app.get('/api/received', (_req, res) => {
     res.json({ files: listReceived() });
+  });
+
+  // ---- 统一活动流（收到的文件 + 发送历史） ----
+  app.get('/api/activity', (_req, res) => {
+    res.json({ activities: listActivity() });
+  });
+
+  // ---- 删除单条“收到的文件” ----
+  app.delete('/api/received/:id', (req, res) => {
+    const ok = removeReceived(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'not_found' });
+    res.json({ ok: true });
+  });
+
+  // ---- 清空“收到的文件” ----
+  app.delete('/api/received', (_req, res) => {
+    clearReceived();
+    res.json({ ok: true });
   });
 
   // ---- 手机 → 电脑：上传 ----

@@ -2,7 +2,6 @@ package com.localsharing.app.ui
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,35 +13,43 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.InsertDriveFile
 import com.localsharing.app.model.OutgoingItem
 import com.localsharing.app.util.OpenDocuments
 import com.localsharing.app.util.formatSize
 import com.localsharing.app.util.zipUris
+import com.localsharing.app.viewmodel.ConnState
 import com.localsharing.app.viewmodel.ShareViewModel
 import kotlinx.coroutines.launch
 import java.io.File
@@ -59,6 +66,13 @@ fun HomeScreen(vm: ShareViewModel) {
     val progress by vm.uploadProgress.collectAsState()
     val incoming by vm.incoming.collectAsState()
     val saved by vm.saved.collectAsState()
+    val conn by vm.connState.collectAsState()
+    val autoSave by vm.autoSave.collectAsState()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(error) {
+        if (error.isNotBlank()) snackbarHostState.showSnackbar(error)
+    }
 
     val pickFiles = rememberLauncherForActivityResult(OpenDocuments()) { uris ->
         if (uris.isNotEmpty()) {
@@ -86,7 +100,6 @@ fun HomeScreen(vm: ShareViewModel) {
                         )
                         vm.setSelectedItems(selected + item)
                     } else {
-                        // 压缩失败，回退为逐文件
                         vm.setSelectedItems(selected + uris.map { vm.toOutgoingItem(it) })
                     }
                 }
@@ -97,17 +110,40 @@ fun HomeScreen(vm: ShareViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Column { Text("局域网互传工具"); Text("已连接：${pcInfo.name}", style = MaterialTheme.typography.bodySmall) } },
+                title = {
+                    Column {
+                        Text("local-sharing")
+                        Text("已连接：${pcInfo.name}", style = MaterialTheme.typography.bodySmall)
+                    }
+                },
                 actions = {
-                    Button(onClick = { vm.disconnect() }) { Text("断开") }
+                    OutlinedButton(onClick = { vm.disconnect() }) { Text("断开") }
                 },
             )
+        },
+        snackbarHost = {
+            SnackbarHost(snackbarHostState) { data ->
+                Snackbar(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                ) { Text(data.visuals.message) }
+            }
         },
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // 连接状态横幅
+            item {
+                ConnectionBanner(
+                    connected = conn == ConnState.Connected,
+                    reconnecting = conn == ConnState.Reconnecting,
+                    pcName = pcInfo.name,
+                )
+            }
+
             // ---- 发送到电脑 ----
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
@@ -124,23 +160,21 @@ fun HomeScreen(vm: ShareViewModel) {
                         }
                         Spacer(Modifier.height(12.dp))
                         if (selected.isEmpty()) {
-                            Text("尚未选择文件", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                            EmptyState(
+                                icon = Icons.Filled.InsertDriveFile,
+                                title = "还没有选择文件",
+                                subtitle = "选择文件或文件夹，即可发送到电脑",
+                            )
                         } else {
                             selected.forEachIndexed { idx, item ->
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = if (item.isFolder) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
-                                        contentDescription = null,
-                                    )
-                                    Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
-                                        Text(item.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        Text(formatSize(item.size), style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    IconButton(onClick = { vm.removeSelected(idx) }) {
-                                        Text("✕")
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
+                                FileCard(
+                                    name = item.displayName,
+                                    meta = formatSize(item.size),
+                                    isFolder = item.isFolder,
+                                    modifier = Modifier.padding(bottom = 8.dp),
+                                    actionLabel = "✕",
+                                    onAction = { vm.removeSelected(idx) },
+                                )
                             }
                             Spacer(Modifier.height(12.dp))
                             Button(
@@ -166,52 +200,52 @@ fun HomeScreen(vm: ShareViewModel) {
             }
 
             // ---- 收到的文件（来自电脑推送） ----
-            item { Text("收到的文件", style = MaterialTheme.typography.titleMedium) }
-            if (incoming.isEmpty()) {
-                item { Text("暂无来自电脑的文件", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }
-            }
-            items(incoming) { t ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(t.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(
-                                "${if (t.kind == "folder") "文件夹" else "文件"} · ${formatSize(t.size)}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            if (t.saving) {
-                                Spacer(Modifier.height(6.dp))
-                                LinearProgressIndicator(progress = { t.progress }, modifier = Modifier.fillMaxWidth())
-                            }
-                        }
-                        if (!t.saving) {
-                            Button(onClick = { vm.saveIncoming(t) }) { Text("保存") }
-                        }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("收到的文件", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("自动保存", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Switch(checked = autoSave, onCheckedChange = { vm.setAutoSave(it) })
                     }
                 }
+            }
+            if (incoming.isEmpty()) {
+                item {
+                    EmptyState(
+                        icon = Icons.Filled.CloudOff,
+                        title = "还没有收到文件",
+                        subtitle = "让电脑端发送，文件会显示在这里",
+                    )
+                }
+            }
+            items(incoming) { t ->
+                FileCard(
+                    name = t.name,
+                    meta = if (t.kind == "folder") "文件夹 · ${formatSize(t.size)}" else "文件 · ${formatSize(t.size)}",
+                    isFolder = t.kind == "folder",
+                    modifier = Modifier.fillMaxWidth(),
+                    actionLabel = if (t.saving) null else "保存",
+                    onAction = { vm.saveIncoming(t) },
+                    progress = if (t.saving) t.progress else null,
+                )
             }
 
             // ---- 已保存 ----
             if (saved.isNotEmpty()) {
-                item { Text("已保存", style = MaterialTheme.typography.titleMedium) }
-                items(saved) { f ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Row(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(imageVector = if (f.kind == "folder") Icons.Filled.Folder else Icons.Filled.InsertDriveFile, contentDescription = null)
-                            Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
-                                Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(f.savedPath, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("已保存", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { vm.clearSaved() }) { Text("清空") }
                     }
                 }
-            }
-
-            if (error.isNotBlank()) {
-                item { Text(error, color = MaterialTheme.colorScheme.error) }
+                items(saved) { f ->
+                    FileCard(
+                        name = f.name,
+                        meta = f.savedPath,
+                        isFolder = f.kind == "folder",
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
     }

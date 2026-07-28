@@ -12,9 +12,11 @@ import com.localsharing.app.model.SavedFile
 import com.localsharing.app.network.ShareApi
 import com.localsharing.app.network.ShareWebSocket
 import com.localsharing.app.network.WsEvent
+import com.localsharing.app.util.Prefs
 import com.localsharing.app.util.extractZip
 import com.localsharing.app.util.getDisplayName
 import com.localsharing.app.util.getSize
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -25,6 +27,7 @@ sealed class ConnState {
     object Disconnected : ConnState()
     object Connecting : ConnState()
     object Connected : ConnState()
+    object Reconnecting : ConnState()
 }
 
 class ShareViewModel(app: Application) : AndroidViewModel(app) {
@@ -58,7 +61,12 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
     private val _saved = MutableStateFlow<List<SavedFile>>(emptyList())
     val saved = _saved.asStateFlow()
 
+    private val _autoSave = MutableStateFlow(Prefs.isAutoSave(app))
+    val autoSave = _autoSave.asStateFlow()
+
     private var ws: ShareWebSocket? = null
+    private var manualDisconnect = false
+    private var reconnecting = false
 
     /** 通过 IP + 端口连接 */
     fun connect(ip: String, port: String, code: String, deviceName: String, deviceType: String) {
@@ -66,6 +74,8 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
             _error.value = "无效的地址"
             return
         }
+        manualDisconnect = false
+        reconnecting = false
         _baseUrl.value = base
         _connState.value = ConnState.Connecting
         viewModelScope.launch {
@@ -86,6 +96,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 _deviceId.value = reg.deviceId
                 _token.value = reg.token
                 _wsUrl.value = reg.wsUrl.ifEmpty { "${base.replace("http", "ws")}/ws?token=${reg.token}" }
+                Prefs.saveLastConnection(getApplication(), base, info.name)
                 connectWs()
                 _connState.value = ConnState.Connected
             } catch (e: Exception) {
@@ -115,18 +126,63 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
     private fun onWsEvent(ev: WsEvent) {
         when (ev) {
             is WsEvent.Open -> { /* 连接建立 */ }
-            is WsEvent.Incoming -> _incoming.update { it + ev.transfer }
-            is WsEvent.Failure -> _error.value = ev.msg
-            is WsEvent.Closed -> { /* 可由心跳/重连处理，此处忽略 */ }
+            is WsEvent.Incoming -> {
+                _incoming.update { it + ev.transfer }
+                // 自动保存开启时，收到即保存
+                if (_autoSave.value) saveIncoming(ev.transfer)
+            }
+            is WsEvent.Failure -> {
+                _error.value = ev.msg
+                maybeReconnect()
+            }
+            is WsEvent.Closed -> maybeReconnect()
+        }
+    }
+
+    /** WS 断开后，非用户主动断开则指数退避重连 */
+    private fun maybeReconnect() {
+        if (manualDisconnect || reconnecting) return
+        if (_connState.value == ConnState.Disconnected) return
+        reconnecting = true
+        _connState.value = ConnState.Reconnecting
+        viewModelScope.launch {
+            var attempt = 0
+            while (!manualDisconnect) {
+                val delayMs = (1000L * (1 shl attempt.coerceAtMost(5))).coerceAtMost(30_000L)
+                attempt++
+                delay(delayMs)
+                if (manualDisconnect) break
+                try {
+                    val info = ShareApi.getInfo(_baseUrl.value)
+                    val reg = ShareApi.register(_baseUrl.value, Build.MODEL, "phone", null)
+                    if (reg.deviceId.isEmpty()) continue
+                    _deviceId.value = reg.deviceId
+                    _token.value = reg.token
+                    _wsUrl.value = reg.wsUrl.ifEmpty { "${_baseUrl.value.replace("http", "ws")}/ws?token=${reg.token}" }
+                    connectWs()
+                    reconnecting = false
+                    _connState.value = ConnState.Connected
+                    break
+                } catch (e: Exception) {
+                    // 继续重试
+                }
+            }
         }
     }
 
     fun disconnect() {
+        manualDisconnect = true
+        reconnecting = false
         ws?.close()
         ws = null
         _connState.value = ConnState.Disconnected
         _incoming.value = emptyList()
         _selectedItems.value = emptyList()
+    }
+
+    fun setAutoSave(on: Boolean) {
+        _autoSave.value = on
+        Prefs.setAutoSave(getApplication(), on)
     }
 
     fun setSelectedItems(items: List<OutgoingItem>) {
@@ -193,6 +249,11 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 _error.value = "接收失败"
             }
         }
+    }
+
+    /** 清空已保存列表（仅清列表，文件保留在 Downloads，避免误删） */
+    fun clearSaved() {
+        _saved.value = emptyList()
     }
 
     /** 由 Uri 构造 OutgoingItem */

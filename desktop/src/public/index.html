@@ -9,63 +9,60 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">⇄</span>
+      <svg class="brand-mark" viewBox="0 0 40 40" width="40" height="40" aria-hidden="true">
+        <defs>
+          <linearGradient id="ls-g" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#3b6cff"/>
+            <stop offset="1" stop-color="#5b7cff"/>
+          </linearGradient>
+        </defs>
+        <rect width="40" height="40" rx="12" fill="url(#ls-g)"/>
+        <path d="M12 16h13l-3-3 1.4-1.4L27.8 17l-4.4 4.4L22 20l3-3H12v-1zm16 8H15l3 3-1.4 1.4L12.2 23l4.4-4.4L18 20l-3 3h16v1z" fill="#fff"/>
+      </svg>
       <div>
-        <h1>局域网互传工具</h1>
-        <p class="sub">local-sharing · 电脑端</p>
+        <h1>local-sharing</h1>
+        <p class="sub">局域网互传 · 电脑端</p>
       </div>
     </div>
     <div class="conn" id="connState"><span class="dot off"></span> 连接中…</div>
   </header>
 
+  <section class="hero">
+    <div class="qr"><img id="qr" alt="二维码" /></div>
+    <div class="hero-info">
+      <div class="overline">本机名称</div>
+      <div class="display" id="devName">—</div>
+      <div class="overline" style="margin-top:16px">连接方式</div>
+      <div class="addr-row">
+        <code class="addr" id="connectUrl">—</code>
+        <button class="btn copy sm" id="copyBtn">📋 复制</button>
+      </div>
+      <p class="hint">手机扫码，或输入地址即可连接</p>
+    </div>
+  </section>
+
   <main class="grid">
-    <!-- 连接卡片 -->
-    <section class="card connect">
-      <h2>连接方式</h2>
-      <div class="qr-wrap">
-        <img id="qr" alt="二维码" />
+    <section class="card">
+      <h2 class="card__title">已连接设备 <span class="badge" id="devCount">0</span></h2>
+      <ul class="list" id="deviceList"></ul>
+    </section>
+
+    <section class="card">
+      <h2 class="card__title">发送到设备</h2>
+      <label class="field"><span>选择设备</span><select id="targetDevice"></select></label>
+      <div class="drop" id="drop">
+        把文件拖到这里，或
+        <label class="btn primary sm">选择文件<input type="file" id="fileInput" multiple hidden /></label>
+        <label class="btn secondary sm">选择文件夹<input type="file" id="folderInput" webkitdirectory multiple hidden /></label>
       </div>
-      <p class="hint">手机/平板扫描二维码，或在 App 中输入下方地址：</p>
-      <code id="connectUrl" class="url">—</code>
-      <p class="devname">本机名称：<b id="devName">—</b></p>
+      <ul class="list" id="pickList"></ul>
+      <button class="btn primary" id="sendBtn" disabled>发送 →</button>
+      <div class="log" id="sendLog"></div>
     </section>
 
-    <!-- 设备列表 -->
-    <section class="card devices">
-      <h2>已连接设备 <span id="devCount" class="badge">0</span></h2>
-      <ul id="deviceList" class="list">
-        <li class="empty">暂无设备连接</li>
-      </ul>
-    </section>
-
-    <!-- 发送面板 -->
-    <section class="card send">
-      <h2>发送到设备</h2>
-      <label class="field">
-        <span>选择设备</span>
-        <select id="targetDevice"><option value="">— 请选择 —</option></select>
-      </label>
-      <div class="file-actions">
-        <label class="btn file">
-          选择文件
-          <input type="file" id="fileInput" multiple hidden />
-        </label>
-        <label class="btn file">
-          选择文件夹
-          <input type="file" id="folderInput" webkitdirectory multiple hidden />
-        </label>
-      </div>
-      <ul id="pickList" class="list small"></ul>
-      <button id="sendBtn" class="btn primary" disabled>发送</button>
-      <div id="sendLog" class="log"></div>
-    </section>
-
-    <!-- 接收列表 -->
-    <section class="card received">
-      <h2>收到的文件</h2>
-      <ul id="receivedList" class="list">
-        <li class="empty">还没有收到文件</li>
-      </ul>
+    <section class="card">
+      <h2 class="card__title">传输记录 <button class="btn ghost sm" id="clearBtn">清空</button></h2>
+      <ul class="timeline" id="transferLog"></ul>
     </section>
   </main>
 

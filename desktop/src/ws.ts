@@ -1,6 +1,6 @@
 import { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { bus, authenticate, getDevice, touchDevice, completeTransfer, listDevices } from './services/services';
+import { bus, authenticate, getDevice, touchDevice, completeTransfer, listDevices, deviceIcon } from './services/services';
 import { ClientMessage, ServerMessage, Transfer } from './types';
 
 const pcSockets = new Set<WebSocket>();
@@ -62,9 +62,15 @@ export function createHub(httpServer: HttpServer): void {
   });
 
   bus.on('upload-received', (payload: { files: unknown }) => {
+    const files = (payload.files as any[]).map((f) => ({
+      id: f.id,
+      name: f.name,
+      size: f.size,
+      kind: f.kind,
+    }));
     for (const ws of pcSockets) {
       if (ws.readyState === WebSocket.OPEN) {
-        send(ws, { type: 'upload-received', file: (payload.files as any[])[0] });
+        send(ws, { type: 'upload-received', files });
       }
     }
   });
@@ -82,12 +88,32 @@ export function createHub(httpServer: HttpServer): void {
         },
       });
     }
+    // 同时通知 PC 仪表盘：出现一条“发送中”记录
+    const summary = {
+      id: payload.transfer.id,
+      name: payload.transfer.name,
+      size: payload.transfer.size,
+      kind: payload.transfer.kind,
+    };
+    for (const ws of pcSockets) {
+      if (ws.readyState === WebSocket.OPEN) {
+        send(ws, { type: 'transfer-out-started', transfer: summary });
+      }
+    }
   });
 
   bus.on('transfer-completed', (payload: { transferId: string }) => {
     for (const ws of pcSockets) {
       if (ws.readyState === WebSocket.OPEN) {
         send(ws, { type: 'transfer-completed', transferId: payload.transferId });
+      }
+    }
+  });
+
+  bus.on('transfer-failed', (payload: { transferId: string }) => {
+    for (const ws of pcSockets) {
+      if (ws.readyState === WebSocket.OPEN) {
+        send(ws, { type: 'transfer-failed', transferId: payload.transferId });
       }
     }
   });
@@ -103,6 +129,7 @@ function broadcastDeviceList(): void {
     name: d.name,
     type: d.type,
     online: !!d.ws,
+    icon: deviceIcon(d.type),
   }));
   const msg: ServerMessage = { type: 'device-list', devices };
   for (const ws of pcSockets) {

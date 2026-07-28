@@ -13,6 +13,19 @@ export interface Device {
 export type TransferKind = 'file' | 'folder';
 export type TransferStatus = 'pending' | 'ready' | 'downloading' | 'completed' | 'failed';
 
+/** 活动流条目：合并“收到的文件(in)”与“发送历史(out)” */
+export interface ActivityItem {
+  id: string;
+  direction: 'in' | 'out';
+  name: string;
+  size: number;
+  kind: TransferKind;
+  /** in: 来源设备名；out: 始终为“本机” */
+  deviceName: string;
+  status: TransferStatus;
+  time: number;
+}
+
 export interface Transfer {
   id: string;
   fromDeviceId: string | null; // null 表示来自电脑端
@@ -41,8 +54,10 @@ export type ServerMessage =
   | { type: 'welcome'; deviceId: string }
   | { type: 'device-list'; devices: DeviceInfo[] }
   | { type: 'incoming'; transfer: TransferInfo }
-  | { type: 'upload-received'; file: ReceivedFileInfo }
-  | { type: 'transfer-completed'; transferId: string };
+  | { type: 'upload-received'; files: ReceivedFileInfo[] }
+  | { type: 'transfer-out-started'; transfer: TransferInfo }
+  | { type: 'transfer-completed'; transferId: string }
+  | { type: 'transfer-failed'; transferId: string };
 
 export type ClientMessage =
   | { type: 'hello' }
@@ -53,6 +68,8 @@ export interface DeviceInfo {
   name: string;
   type: DeviceType;
   online: boolean;
+  /** 展示用图标字符，前端据此映射 */
+  icon?: string;
 }
 
 export interface TransferInfo {
