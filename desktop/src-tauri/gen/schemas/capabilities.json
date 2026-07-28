@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"","local":true,"windows":["main"],"permissions":["core:default","shell:default","shell:allow-open",{"identifier":"shell:allow-execute","allow":[{"args":true,"cwd":true,"name":"node","sidecar":true}]}]}}

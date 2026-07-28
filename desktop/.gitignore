@@ -5,3 +5,12 @@ data/received/
 data/outbox/
 *.log
 .DS_Store
+
+# Tauri 构建产物
+src-tauri/target/
+# sidecar 二进制由 scripts/bundle-server.mjs 从 node.exe 复制，不入库
+src-tauri/binaries/node-*.exe
+# 打包进安装包的服务器资源（由 bundle-server.mjs 生成）
+src-tauri/resources/server
+# 由 make-icon.mjs 生成的临时图标源（npx tauri icon 会重新生成）
+scripts/icon-1024.png
