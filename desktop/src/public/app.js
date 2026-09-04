@@ -15,6 +15,7 @@ async function initInfo() {
   $('#copyBtn').onclick = () => copyText(info.connectUrl);
   connectWs();
   loadActivity();
+  loadSettings();
 }
 
 // ---- WebSocket ----
@@ -60,6 +61,42 @@ function renderDevices(devices) {
     devices.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
 }
 
+// ---- 设置 ----
+let downloadDir = '';
+let lastDeviceId = '';
+
+async function loadSettings() {
+  try {
+    const s = await fetch('/api/settings').then((r) => r.json());
+    downloadDir = s.downloadDir || '';
+    lastDeviceId = s.lastDeviceId || '';
+    $('#downloadDir').textContent = downloadDir || '默认';
+  } catch {
+    $('#downloadDir').textContent = '默认';
+  }
+}
+
+$('#changeDirBtn').onclick = async () => {
+  let dir = '';
+  try {
+    const r = await fetch('/api/pick-folder', { method: 'POST' }).then((r) => r.json());
+    if (r.ok && r.path) dir = r.path;
+  } catch { /* 忽略，走回退 */ }
+  // 回退：接口不可用或用户在系统对话框取消但希望手输
+  if (!dir) {
+    dir = prompt('输入保存目录的完整路径（如 D:\\传输文件）：', downloadDir || '');
+  }
+  if (!dir) return; // 用户取消
+  dir = String(dir).trim();
+  if (!dir) return;
+  const s = await fetch('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ downloadDir: dir })
+  }).then((r) => r.json());
+  if (s.ok) { downloadDir = dir; $('#downloadDir').textContent = dir; toast('保存目录已更新', true); }
+  else toast(s.error || '设置失败', false);
+};
+
 // ---- 传输记录（统一活动流） ----
 async function loadActivity() {
   const { activities } = await fetch('/api/activity').then((r) => r.json());
@@ -73,10 +110,14 @@ async function loadActivity() {
     const statusPill = statusPillOf(a);
     const del = a.direction === 'in'
       ? `<button class="rm" data-del="${a.id}" title="删除">✕</button>` : '';
+    const openBtn = a.direction === 'in' && a.savedPath
+      ? `<button class="btn ghost sm open-folder-btn" data-open="${escAttr(a.savedPath)}" title="打开文件夹">📂</button>`
+      : '';
     return `<li>
       <div class="tl-row">
         <span class="tl-dir ${a.direction}">${dir}</span>
         <span class="tl-name">${esc(a.name)}</span>
+        ${openBtn}
         ${statusPill}
         ${del}
       </div>
@@ -84,8 +125,19 @@ async function loadActivity() {
       <span class="tl-t">${fmtTime(a.time)}</span>
     </li>`;
   }).join('');
+  // 删除按钮
   ul.querySelectorAll('[data-del]').forEach((b) => {
     b.onclick = () => deleteReceived(b.getAttribute('data-del'));
+  });
+  // 打开文件夹按钮
+  ul.querySelectorAll('[data-open]').forEach((b) => {
+    b.onclick = async () => {
+      const filePath = b.getAttribute('data-open');
+      await fetch('/api/open-folder', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath })
+      }).then((r) => r.json());
+    };
   });
 }
 
@@ -105,10 +157,19 @@ async function deleteReceived(id) {
   else toast('删除失败', false);
 }
 
+// 清空全部历史（仅清记录，不删磁盘文件）
 $('#clearBtn').onclick = async () => {
-  if (!confirm('确定清空所有收到的文件？此操作不可撤销。')) return;
+  if (!confirm('确定清空全部历史记录？此操作仅清除记录，不会删除已保存的文件。')) return;
+  const res = await fetch('/api/history', { method: 'DELETE' });
+  if (res.ok) { toast('历史已清空', true); loadActivity(); }
+  else toast('清空失败', false);
+};
+
+// 清空收到的文件（同时删除磁盘文件）
+$('#clearReceivedBtn').onclick = async () => {
+  if (!confirm('确定清空所有收到的文件？此操作会删除磁盘上的文件，不可撤销。')) return;
   const res = await fetch('/api/received', { method: 'DELETE' });
-  if (res.ok) { toast('已清空', true); loadActivity(); }
+  if (res.ok) { toast('已清空收到的文件', true); loadActivity(); }
   else toast('清空失败', false);
 };
 
@@ -143,6 +204,17 @@ drop.addEventListener('drop', (e) => {
     // 含子目录时浏览器只给扁平文件，文件夹统一标记为 folder 由后端打包
     for (const f of files) picked.push({ name: f.name, file: f, folder: false });
     renderPicked();
+    // 拖拽即发：未手动选设备时，自动用上次设备发送；否则弹出设备选择
+    const targetDevice = $('#targetDevice').value;
+    if (!targetDevice) {
+      if (lastDeviceId) {
+        sendTo(lastDeviceId, `已发送至上次使用的设备`);
+      } else {
+        openDevicePicker();
+      }
+    } else {
+      toast('已加入发送列表，点击「发送」即可', true);
+    }
   }
 });
 
@@ -150,6 +222,16 @@ drop.addEventListener('drop', (e) => {
 $('#sendBtn').addEventListener('click', async () => {
   const deviceId = $('#targetDevice').value;
   if (!deviceId || !picked.length) return;
+  await sendTo(deviceId, `已发送：${$('#targetDevice').selectedOptions[0].text}`);
+});
+
+/** 通用发送：发送 picked 中的文件到指定设备，并记忆该设备为“上次发送设备” */
+async function sendTo(deviceId, okMsg) {
+  if (!deviceId || !picked.length) return;
+  const deviceSelect = $('#targetDevice');
+  const deviceName = deviceSelect.value === deviceId && deviceSelect.selectedOptions[0]
+    ? deviceSelect.selectedOptions[0].text
+    : (deviceSelect.querySelector(`option[value="${deviceId}"]`)?.text || deviceId);
   const fd = new FormData();
   picked.forEach((p) => fd.append('files', p.file, p.name));
   fd.append('deviceId', deviceId);
@@ -158,13 +240,54 @@ $('#sendBtn').addEventListener('click', async () => {
   try {
     const res = await fetch('/api/transfer/out', { method: 'POST', body: fd });
     const data = await res.json();
-    if (data.ok) log(`已发送：${data.transfer.name} → ${$('#targetDevice').selectedOptions[0].text}`);
-    else log('发送失败：' + (data.error || '未知错误'));
+    if (data.ok) {
+      log(okMsg || `已发送：${data.transfer.name}`);
+      // 记忆上次发送设备（落盘 settings.json）
+      lastDeviceId = deviceId;
+      try {
+        await fetch('/api/settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lastDeviceId: deviceId })
+        });
+      } catch { /* 记忆失败不致命 */ }
+    } else {
+      log('发送失败：' + (data.error || '未知错误'));
+    }
   } catch (e) {
     log('发送失败：' + e.message);
   }
   picked = []; renderPicked();
+}
+
+// ---- 拖拽即发：设备选择浮层 ----
+const devicePicker = $('#devicePicker');
+const pickerDevice = $('#pickerDevice');
+
+function openDevicePicker() {
+  // 用当前在线设备回填选项
+  const sel = $('#targetDevice');
+  pickerDevice.innerHTML = sel.innerHTML || '<option value="">— 请选择 —</option>';
+  // 预选上次设备
+  if (lastDeviceId) pickerDevice.value = lastDeviceId;
+  devicePicker.classList.remove('hidden');
+}
+
+function closeDevicePicker() {
+  devicePicker.classList.add('hidden');
+}
+
+$('#pickerCancel').onclick = () => closeDevicePicker();
+devicePicker.addEventListener('click', (e) => {
+  if (e.target === devicePicker) closeDevicePicker();
 });
+$('#pickerConfirm').onclick = async () => {
+  const deviceId = pickerDevice.value;
+  if (!deviceId) { toast('请选择设备', false); return; }
+  closeDevicePicker();
+  // 同步主选择框，便于后续手动发送
+  $('#targetDevice').value = deviceId;
+  await sendTo(deviceId, '已发送：拖拽即发');
+};
 
 function log(msg) {
   const el = document.createElement('div');
@@ -185,6 +308,9 @@ function fmtTime(ts) {
 }
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function escAttr(s) {
+  return String(s).replace(/"/g, '&quot;');
 }
 function copyText(text) {
   navigator.clipboard?.writeText(text).then(

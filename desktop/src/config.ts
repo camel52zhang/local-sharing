@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { ActivityItem } from './types';
 
 function required(name: string, fallback?: string): string {
   const v = process.env[name];
@@ -52,4 +53,94 @@ export const paths = {
 export function ensureDirs(): void {
   fs.mkdirSync(paths.received, { recursive: true });
   fs.mkdirSync(paths.outbox, { recursive: true });
+}
+
+// ---- 用户设置持久化 ----
+
+export interface Settings {
+  downloadDir: string;
+  /** 上次发送成功的目标设备 id；用于拖拽即发时记忆上次设备 */
+  lastDeviceId: string;
+}
+
+export const settingsPath = path.join(config.dataDir, 'settings.json');
+
+export function loadSettings(): Settings {
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      return {
+        downloadDir: typeof parsed.downloadDir === 'string' ? parsed.downloadDir : '',
+        lastDeviceId: typeof parsed.lastDeviceId === 'string' ? parsed.lastDeviceId : '',
+      };
+    }
+  } catch {
+    // ignore corrupt settings
+  }
+  return { downloadDir: '', lastDeviceId: '' };
+}
+
+export function saveSettings(s: Settings): void {
+  fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2), 'utf-8');
+}
+
+export function updateSettings(patch: Partial<Settings>): Settings {
+  const s = loadSettings();
+  if (patch.downloadDir !== undefined) s.downloadDir = patch.downloadDir;
+  if (patch.lastDeviceId !== undefined) s.lastDeviceId = patch.lastDeviceId;
+  saveSettings(s);
+  return s;
+}
+
+// ---- 活动流持久化（历史记录） ----
+
+/** 历史记录落盘路径，与 settings.json 同级 */
+export const historyPath = path.join(config.dataDir, 'history.json');
+
+/**
+ * 读取持久化的活动流。
+ * 文件损坏或不存在时回退为空数组（不致命，沿用 loadSettings 的容错范式）。
+ */
+export function loadHistory(): ActivityItem[] {
+  try {
+    if (fs.existsSync(historyPath)) {
+      const raw = JSON.parse(fs.readFileSync(historyPath, 'utf-8'));
+      if (Array.isArray(raw)) return raw as ActivityItem[];
+    }
+  } catch {
+    // ignore corrupt history, fall back to empty
+  }
+  return [];
+}
+
+/** 全量覆盖写入活动流 */
+export function saveHistory(items: ActivityItem[]): void {
+  try {
+    fs.writeFileSync(historyPath, JSON.stringify(items, null, 2), 'utf-8');
+  } catch {
+    // 写历史失败不阻断主流程
+  }
+}
+
+/** 追加单条活动并落盘（保持时间倒序由调用方负责） */
+export function appendHistory(item: ActivityItem): ActivityItem[] {
+  const items = loadHistory();
+  items.push(item);
+  saveHistory(items);
+  return items;
+}
+
+/** 清空全部历史（仅清记录，不删磁盘实际文件） */
+export function clearHistory(): ActivityItem[] {
+  saveHistory([]);
+  return [];
+}
+
+/** 获取实际使用的下载目录：用户自定义优先，否则默认 received 目录 */
+export function getEffectiveDownloadDir(): string {
+  const settings = loadSettings();
+  if (settings.downloadDir && fs.existsSync(settings.downloadDir)) {
+    return settings.downloadDir;
+  }
+  return paths.received;
 }

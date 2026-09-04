@@ -1,0 +1,72 @@
+%% 4.1 桌面：历史持久化（启动加载 → 接收落盘）
+sequenceDiagram
+    participant FS as 文件系统 history.json
+    participant Svc as services.ts
+    participant Bus as EventBus
+    participant UI as app.js
+
+    Note over Svc: 模块加载时
+    Svc->>FS: loadHistory()
+    FS-->>Svc: ActivityItem[] (或空)
+    Svc->>Svc: 回填 received / outgoing 数组
+
+    Note over Svc: 手机上传文件时
+    UI->>Svc: recordReceived(device, files, asFolder)
+    Svc->>Svc: 写入 received[]
+    Svc->>FS: appendActivity(in-item)
+    Svc->>Bus: emit('upload-received')
+    Bus->>UI: 刷新活动流（含历史）
+
+    Note over Svc: 清空全部历史时
+    UI->>Svc: clearHistory()
+    Svc->>FS: 清空 history.json（不删磁盘文件）
+    Svc->>Bus: emit('history-cleared')
+    Bus->>UI: 刷新
+
+%% 4.2 桌面：拖拽即发
+sequenceDiagram
+    participant User as 用户
+    participant UI as app.js
+    participant Svc as /api/settings
+    participant Server as app.ts
+
+    User->>UI: 拖文件到发送区
+    UI->>UI: addPicked(files)
+    UI->>UI: 检测 targetDevice 是否为空
+    alt 已选设备
+        UI->>User: 高亮"发送"按钮（保持手动）
+    else 未选设备
+        UI->>Svc: GET /api/settings (取 lastDeviceId)
+        Svc-->>UI: { lastDeviceId }
+        UI->>User: 弹设备选择浮层（预选 lastDeviceId）
+        User->>UI: 选择设备并确认
+        UI->>UI: 设置 targetDevice
+        UI->>Server: POST /api/transfer/out（自动发送）
+        Server-->>UI: { ok, transfer }
+        UI->>Svc: POST /api/settings { lastDeviceId } （记忆）
+    end
+
+%% 4.3 Android：选目录存文件（SAF 复用）
+sequenceDiagram
+    participant User as 用户
+    participant HS as HomeScreen
+    participant VM as ShareViewModel
+    participant Prefs as Prefs(SP)
+    participant SAF as OpenDocumentTree
+    participant Store as DocumentFile
+
+    User->>HS: 点"保存目录"按钮
+    HS->>HS: pickSaveDir.launch(null)  // 复用 openDocumentTreeContract 单例
+    HS->>SAF: 系统目录选择
+    SAF-->>HS: onPickSaveDirResult(treeUri)
+    HS->>VM: setSaveDir(treeUri)
+    VM->>Prefs: setSaveTreeUri(treeUri.toString())
+    VM->>VM: takePersistableUriPermission(treeUri)  // 持久访问权
+    Note over VM: 之后收到文件
+    VM->>Prefs: getSaveTreeUri()
+    alt 有保存目录
+        VM->>Store: DocumentFile.fromTreeUri(treeUri).createFile(...)
+        VM->>Store: 写入字节流
+    else 无（默认）
+        VM->>VM: getExternalFilesDir(DIRECTORY_DOWNLOADS)  // 原逻辑
+    end

@@ -1,6 +1,8 @@
 package com.localsharing.app.ui
 
 import android.net.Uri
+import android.util.Log
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,11 +14,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -46,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import com.localsharing.app.model.OutgoingItem
+import com.localsharing.app.util.CrashLogCollector
 import com.localsharing.app.util.OpenDocuments
 import com.localsharing.app.util.formatSize
 import com.localsharing.app.util.zipUris
@@ -53,6 +58,12 @@ import com.localsharing.app.viewmodel.ConnState
 import com.localsharing.app.viewmodel.ShareViewModel
 import kotlinx.coroutines.launch
 import java.io.File
+
+// contract 必须是稳定单例：内联 new 会在每次重组时生成新实例，导致 rememberLauncherForActivityResult
+// 反复 register，ActivityResultRegistry 的 mNextRc 计数器越过 16 位上限
+// （Can only use lower 16 bits for requestCode），下次 launch() 即崩溃。
+private val openDocumentsContract = OpenDocuments()
+private val openDocumentTreeContract = ActivityResultContracts.OpenDocumentTree()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,44 +78,107 @@ fun HomeScreen(vm: ShareViewModel) {
     val incoming by vm.incoming.collectAsState()
     val saved by vm.saved.collectAsState()
     val conn by vm.connState.collectAsState()
+    val pending by vm.pendingShare.collectAsState()
     val autoSave by vm.autoSave.collectAsState()
+    val saveDirName by vm.saveDirName.collectAsState()
+    val saveDirUri by vm.saveDirUri.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
+    var showLog by remember { mutableStateOf(false) }
+    val crashedLastRun = remember { CrashLogCollector.lastRunCrashed }
     LaunchedEffect(error) {
         if (error.isNotBlank()) snackbarHostState.showSnackbar(error)
     }
 
-    val pickFiles = rememberLauncherForActivityResult(OpenDocuments()) { uris ->
-        if (uris.isNotEmpty()) {
-            val items = uris.map { vm.toOutgoingItem(it) }
-            vm.setSelectedItems(selected + items)
-        }
+    // 连接成功后，把系统分享暂存的项自动填入发送列表（pending 清空后不再重复加入）
+    LaunchedEffect(conn, pending) {
+        if (conn == ConnState.Connected && pending.isNotEmpty()) vm.flushPendingToSelected()
     }
 
-    val pickFolder = rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
-    ) { treeUri ->
-        if (treeUri != null) {
-            val uris = walkTree(context, treeUri)
-            if (uris.isNotEmpty()) {
-                val treeName = DocumentFile.fromTreeUri(context, treeUri)?.name ?: "folder"
-                val zipFile = File(context.cacheDir, "$treeName.zip")
-                scope.launch {
-                    val ok = zipUris(context, uris, zipFile.absolutePath)
-                    if (ok) {
-                        val item = OutgoingItem(
-                            uri = Uri.fromFile(zipFile),
-                            displayName = "$treeName.zip",
-                            size = zipFile.length(),
-                            isFolder = true,
-                        )
-                        vm.setSelectedItems(selected + item)
-                    } else {
-                        vm.setSelectedItems(selected + uris.map { vm.toOutgoingItem(it) })
-                    }
+    // onResult 必须稳定：用 remember 包一层，避免 HomeScreen 因 9 路 collectAsState 频繁重组时
+    // 反复 register，导致 mNextRc 快速越过 16 位上限（Can only use lower 16 bits for requestCode）。
+    val onPickFilesResult = remember {
+        { uris: List<Uri> ->
+            try {
+                if (uris.isNotEmpty()) {
+                    val items = uris.map { vm.toOutgoingItem(it) }
+                    vm.setSelectedItems(vm.selectedItems.value + items)
                 }
+            } catch (e: Exception) {
+                // 结果回调内的任何未捕获异常都会直接杀死进程；这里兜底为上报错误而非闪退。
+                Log.e("HomeScreen", "pickFiles failed: ${e.message}")
+                vm.reportError("选择文件失败：${e.message ?: "未知错误"}")
             }
         }
+    }
+    val pickFiles = rememberLauncherForActivityResult(openDocumentsContract, onPickFilesResult)
+
+    val onPickFolderResult = remember {
+        { treeUri: Uri? ->
+            try {
+                if (treeUri != null) {
+                    val uris = walkTree(context, treeUri)
+                    if (uris.isNotEmpty()) {
+                        val treeName = DocumentFile.fromTreeUri(context, treeUri)?.name ?: "folder"
+                        val zipFile = File(context.cacheDir, "$treeName.zip")
+                        scope.launch {
+                            try {
+                                val ok = zipUris(context, uris, zipFile.absolutePath)
+                                if (ok) {
+                                    val item = OutgoingItem(
+                                        uri = Uri.fromFile(zipFile),
+                                        displayName = "$treeName.zip",
+                                        size = zipFile.length(),
+                                        isFolder = true,
+                                    )
+                                    vm.setSelectedItems(vm.selectedItems.value + item)
+                                } else {
+                                    vm.setSelectedItems(vm.selectedItems.value + uris.map { vm.toOutgoingItem(it) })
+                                }
+                            } catch (e: Exception) {
+                                // 打包失败回退为逐文件（不崩溃），并向用户提示。
+                                Log.e("HomeScreen", "zipUris failed: ${e.message}")
+                                vm.reportError("打包文件夹失败，已改为逐文件处理：${e.message ?: "未知错误"}")
+                                try {
+                                    vm.setSelectedItems(vm.selectedItems.value + uris.map { vm.toOutgoingItem(it) })
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("HomeScreen", "pickFolder failed: ${e.message}")
+                vm.reportError("选择文件夹失败：${e.message ?: "未知错误"}")
+            }
+        }
+    }
+    val pickFolder = rememberLauncherForActivityResult(
+        openDocumentTreeContract,
+        onPickFolderResult,
+    )
+
+    // 复用同一套“选目录”单例 + 稳定回调（与 pickFolder 同构），避免 mNextRc 越界崩溃。
+    // 仅用于让用户挑选“接收文件保存目录”，结果交给 VM 持久化并申请持久访问权。
+    val onPickSaveDirResult = remember {
+        { treeUri: Uri? ->
+            try {
+                if (treeUri != null) {
+                    vm.setSaveDir(treeUri)
+                }
+            } catch (e: Exception) {
+                Log.e("HomeScreen", "pickSaveDir failed: ${e.message}")
+                vm.reportError("选择保存目录失败：${e.message ?: "未知错误"}")
+            }
+        }
+    }
+    val pickSaveDir = rememberLauncherForActivityResult(
+        openDocumentTreeContract,
+        onPickSaveDirResult,
+    )
+
+    if (showLog) {
+        DiagnosticLogScreen(onClose = { showLog = false })
+        return
     }
 
     Scaffold(
@@ -117,6 +191,7 @@ fun HomeScreen(vm: ShareViewModel) {
                     }
                 },
                 actions = {
+                    OutlinedButton(onClick = { showLog = true }) { Text("诊断日志") }
                     OutlinedButton(onClick = { vm.disconnect() }) { Text("断开") }
                 },
             )
@@ -135,6 +210,28 @@ fun HomeScreen(vm: ShareViewModel) {
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // 上次运行崩溃提示（点击直接进诊断日志）
+            if (crashedLastRun) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth().clickable { showLog = true },
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "上次运行崩溃，点此导出诊断日志",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { showLog = true }) { Text("查看") }
+                        }
+                    }
+                }
+            }
+
             // 连接状态横幅
             item {
                 ConnectionBanner(
@@ -206,6 +303,45 @@ fun HomeScreen(vm: ShareViewModel) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("自动保存", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Switch(checked = autoSave, onCheckedChange = { vm.setAutoSave(it) })
+                    }
+                }
+            }
+            // 接收保存目录设置行（SAF 选目录，持久化记忆）
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("保存位置", style = MaterialTheme.typography.titleSmall)
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = if (saveDirUri.isNotBlank() && saveDirName.isNotBlank())
+                                    saveDirName else "默认：应用 Downloads",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (saveDirUri.isNotBlank()) {
+                                TextButton(onClick = { vm.clearSaveDir() }) { Text("清除") }
+                            }
+                            TextButton(onClick = { pickSaveDir.launch(null) }) {
+                                Text(if (saveDirUri.isNotBlank()) "更改" else "选择目录")
+                            }
+                        }
+                        if (saveDirUri.isNotBlank() && saveDirName.isBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                saveDirUri,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }

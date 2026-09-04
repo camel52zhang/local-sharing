@@ -22,6 +22,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +37,7 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.common.InputImage
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "ScannerScreen"
@@ -47,41 +49,55 @@ fun ScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
     val scanned = remember { AtomicBoolean(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                val previewView = PreviewView(ctx)
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                cameraProviderFuture.addListener({
+        val previewView = remember { PreviewView(context) }
+
+        // 相机绑定必须在生命周期可观察的 DisposableEffect 中进行，
+        // 并在 composable 离开组合时 unbindAll()，否则扫码成功导航切走后
+        // use cases 仍绑在正在销毁的 PreviewView/lifecycle 上会抛 IllegalStateException 闪退。
+        DisposableEffect(lifecycleOwner) {
+            val scanner: BarcodeScanner = BarcodeScanning.getClient()
+            val analysisExecutor = Executors.newSingleThreadExecutor()
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+            cameraProviderFuture.addListener({
+                try {
                     val cameraProvider = cameraProviderFuture.get()
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
-                    val scanner: BarcodeScanner = BarcodeScanning.getClient()
                     val analysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_BLOCK_PRODUCER)
                         .build()
                         .also {
-                            it.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                            it.setAnalyzer(analysisExecutor) { imageProxy ->
                                 processImage(imageProxy, scanner) { value ->
                                     if (scanned.compareAndSet(false, true)) onResult(value)
                                 }
                             }
                         }
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            analysis,
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "camera bind failed: ${e.message}")
-                    }
-                }, ContextCompat.getMainExecutor(ctx))
-                previewView
-            },
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        analysis,
+                    )
+                } catch (e: Exception) {
+                    // 相机初始化/绑定失败（缺权限、无相机、CameraX 未就绪等）不能让 App 闪退，
+                    // 记录日志并退回连接页
+                    Log.e(TAG, "camera init failed: ${e.message}")
+                    onCancel()
+                }
+            }, ContextCompat.getMainExecutor(context))
+            onDispose {
+                try { if (cameraProviderFuture.isDone) cameraProviderFuture.get().unbindAll() } catch (_: Exception) {}
+                try { scanner.close() } catch (_: Exception) {}
+                try { analysisExecutor.shutdown() } catch (_: Exception) {}
+            }
+        }
+
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { previewView },
         )
 
         // 顶部渐变遮罩
@@ -151,14 +167,25 @@ private fun processImage(proxy: ImageProxy, scanner: BarcodeScanner, onResult: (
         proxy.close()
         return
     }
-    val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
-    scanner.process(input)
-        .addOnSuccessListener { barcodes ->
-            for (b in barcodes) {
-                b.rawValue?.let { onResult(it) }
-                break
+    try {
+        val input = InputImage.fromMediaImage(mediaImage, proxy.imageInfo.rotationDegrees)
+        scanner.process(input)
+            .addOnSuccessListener { barcodes ->
+                try {
+                    for (b in barcodes) {
+                        b.rawValue?.let { onResult(it) }
+                        break
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "barcode scan result failed: ${e.message}")
+                }
             }
-        }
-        .addOnFailureListener { Log.w(TAG, "barcode scan failed: ${it.message}") }
-        .addOnCompleteListener { proxy.close() }
+            .addOnFailureListener { Log.w(TAG, "barcode scan failed: ${it.message}") }
+            .addOnCompleteListener { try { proxy.close() } catch (_: Exception) {} }
+    } catch (e: Exception) {
+        // InputImage.fromMediaImage 等同步异常必须兜底，且无论如何都要关闭 ImageProxy，
+        // 否则未关闭的 ImageProxy 会让 CameraX 后续帧无法获取（最终触发崩溃）。
+        Log.e(TAG, "processImage failed: ${e.message}")
+        try { proxy.close() } catch (_: Exception) {}
+    }
 }

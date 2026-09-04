@@ -1,10 +1,11 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import { exec } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import QRCode from 'qrcode';
-import { config, paths, ensureDirs } from './config';
+import { config, paths, ensureDirs, loadSettings, updateSettings, getEffectiveDownloadDir } from './config';
 import { getLanIp, getConnectUrl } from './network';
 import {
   registerDevice,
@@ -17,6 +18,7 @@ import {
   recordReceived,
   removeReceived,
   clearReceived,
+  clearAllHistory,
   finalizeOutgoing,
   getTransfer,
   completeTransfer,
@@ -30,19 +32,52 @@ ensureDirs();
 const lanIp = config.discoverLanIp ? getLanIp() : null;
 const connectUrl = getConnectUrl(config.port, lanIp);
 
+/**
+ * 修复 Content-Disposition 中文文件名 mojibake：
+ * Android OkHttp MultipartBody 可能将 UTF-8 中文当作 Latin-1 发送，
+ * multer 收到的 originalname 是 UTF-8 字节被误读为 Latin-1 的结果。
+ */
+function decodeFilename(raw: string): string {
+  try {
+    const buf = Buffer.from(raw, 'latin1');
+    const utf8 = buf.toString('utf8');
+    // 诊断：对比 latin1→utf8 前后
+    // 若还原后不含替换字符（U+FFFD），采用还原结果
+    if (utf8.indexOf('\ufffd') === -1) return utf8;
+    return raw;
+  } catch {
+    return raw;
+  }
+}
+
 function sanitizeName(name: string): string {
-  const base = path.basename(name).replace(/[\/\\]/g, '_');
-  return base.replace(/[^\w.\-\u4e00-\u9fa5 ]/g, '_') || 'file';
+  const decoded = decodeFilename(name);
+  const base = path.basename(decoded).replace(/[\/\\:*?"<>|]/g, '_');
+  // 允许中文、CJK 符号/标点、全角字符、括号
+  return base.replace(/[^\w.\- \u4e00-\u9fff\u3000-\u303f\uff00-\uffef()（）\[\]【】]/g, '_') || 'file';
 }
 
 const uploadStorage = multer.diskStorage({
-  destination: (req, _file, cb) => {
-    const deviceId = (req.headers['x-device-id'] as string) || 'anonymous';
-    const dir = path.join(paths.received, deviceId);
+  destination: (_req, _file, cb) => {
+    const baseDir = getEffectiveDownloadDir();
+    const dir = path.join(baseDir, 'local-sharing-files');
     fs.mkdirSync(dir, { recursive: true });
     cb(null, dir);
   },
-  filename: (_req, file, cb) => cb(null, sanitizeName(file.originalname)),
+  filename: (_req, file, cb) => {
+    const safe = sanitizeName(file.originalname);
+    // 同名文件自动加序号，避免多设备/多次传输覆盖
+    let final = safe;
+    let n = 1;
+    const ext = path.extname(safe);
+    const stem = path.basename(safe, ext);
+    const dir = path.join(getEffectiveDownloadDir(), 'local-sharing-files');
+    while (fs.existsSync(path.join(dir, final))) {
+      final = `${stem} (${n})${ext}`;
+      n++;
+    }
+    cb(null, final);
+  },
 });
 
 const transferStorage = multer.diskStorage({
@@ -61,6 +96,9 @@ export function buildApp(): express.Express {
   const app = express();
   app.use(cors());
   app.use(express.json());
+  // 手机端 ShareApi 使用 okhttp FormBody（application/x-www-form-urlencoded）提交注册，
+  // 必须显式启用 urlencoded 解析，否则 req.body 为 undefined，name/type/clientId 均取不到。
+  app.use(express.urlencoded({ extended: false }));
 
   // 为 transfer/out 生成临时目录 id
   app.use('/api/transfer/out', (req: any, _res, next) => {
@@ -101,7 +139,11 @@ export function buildApp(): express.Express {
     }
     const name = String(req.body?.name || 'Device');
     const type = (req.body?.type as DeviceType) || 'unknown';
-    const device = registerDevice(name, type);
+    const clientId =
+      typeof req.body?.clientId === 'string' && req.body.clientId.length > 0
+        ? req.body.clientId
+        : undefined;
+    const device = registerDevice(name, type, clientId);
     res.json({
       deviceId: device.id,
       token: device.token,
@@ -132,14 +174,14 @@ export function buildApp(): express.Express {
     res.json({ activities: listActivity() });
   });
 
-  // ---- 删除单条“收到的文件” ----
+  // ---- 删除单条"收到的文件" ----
   app.delete('/api/received/:id', (req, res) => {
     const ok = removeReceived(req.params.id);
     if (!ok) return res.status(404).json({ error: 'not_found' });
     res.json({ ok: true });
   });
 
-  // ---- 清空“收到的文件” ----
+  // ---- 清空"收到的文件" ----
   app.delete('/api/received', (_req, res) => {
     clearReceived();
     res.json({ ok: true });
@@ -153,7 +195,7 @@ export function buildApp(): express.Express {
         const device = authenticate(req.headers['x-token'] as string);
         if (!device) return res.status(401).json({ error: 'unauthorized' });
         const files = (req.files || []).map((f: any) => ({
-          name: f.originalname,
+          name: decodeFilename(f.originalname),
           savedPath: f.path,
           size: f.size,
         }));
@@ -177,7 +219,7 @@ export function buildApp(): express.Express {
             return res.status(404).json({ error: 'device_not_found' });
           }
           const files = (req.files || []).map((f: any) => ({
-            name: f.originalname,
+            name: decodeFilename(f.originalname),
             savedPath: f.path,
             size: f.size,
           }));
@@ -208,6 +250,74 @@ export function buildApp(): express.Express {
   app.post('/api/transfer/:id/ack', (req, res) => {
     completeTransfer(req.params.id);
     res.json({ ok: true });
+  });
+
+  // ---- 用户设置 ----
+  app.get('/api/settings', (_req, res) => {
+    res.json(loadSettings());
+  });
+
+  app.post('/api/settings', (req, res) => {
+    const { downloadDir, lastDeviceId } = req.body;
+    if (downloadDir && !fs.existsSync(downloadDir)) {
+      return res.status(400).json({ error: '目录不存在' });
+    }
+    const s = updateSettings({
+      downloadDir: downloadDir !== undefined ? downloadDir : undefined,
+      lastDeviceId: lastDeviceId !== undefined ? lastDeviceId : undefined,
+    });
+    res.json({ ok: true, settings: s });
+  });
+
+  // ---- 清空全部历史（仅清记录，不删磁盘文件） ----
+  app.delete('/api/history', (_req, res) => {
+    clearAllHistory();
+    res.json({ ok: true });
+  });
+
+  // ---- 在系统资源管理器中打开文件所在位置 ----
+  app.post('/api/open-folder', (req, res) => {
+    const filePath: string | undefined = req.body?.path;
+    if (!filePath || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: '文件不存在' });
+    }
+    const cmd = process.platform === 'win32'
+      ? `explorer.exe /select,"${filePath}"`
+      : process.platform === 'darwin'
+        ? `open -R "${filePath}"`
+        : `xdg-open "${path.dirname(filePath)}"`;
+    exec(cmd, (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ ok: true });
+    });
+  });
+
+  // ---- 弹出系统文件夹选择对话框，返回所选绝对路径 ----
+  // 用 PowerShell 的 Shell.Application.BrowseForFolder（BIF_USENEWUI 现代风格），
+  // 避免改动 Rust/重编。仅 Windows 支持。
+  app.post('/api/pick-folder', (_req, res) => {
+    if (process.platform !== 'win32') {
+      return res.status(400).json({ error: 'unsupported_platform' });
+    }
+    const ps = [
+      '$shell = New-Object -ComObject Shell.Application',
+      "$folder = $shell.BrowseForFolder(0, '选择文件保存目录', 0x1000, 0x11)",
+      'if ($folder -ne $null) { $folder.Self.Path }',
+    ].join('\n');
+    // 用 -EncodedCommand（UTF-16LE base64）规避引号转义问题
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    const child = exec(
+      `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+      { encoding: 'utf8', timeout: 120000, windowsHide: true },
+      (err, stdout) => {
+        if (err) return res.status(500).json({ error: err.message });
+        const picked = (stdout || '').trim();
+        // 用户取消 -> 返回空 path；正常选择 -> 返回绝对路径
+        res.json({ ok: true, path: picked });
+      }
+    );
+    // 防止句柄泄漏
+    child.on('close', () => {});
   });
 
   // 静态仪表盘

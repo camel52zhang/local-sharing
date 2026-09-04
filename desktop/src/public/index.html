@@ -60,11 +60,38 @@
       <div class="log" id="sendLog"></div>
     </section>
 
+    <section class="card" id="settingsCard">
+      <h2 class="card__title">设置</h2>
+      <label class="field">
+        <span>文件保存目录</span>
+        <div class="dir-row">
+          <code class="dir-path" id="downloadDir">默认</code>
+          <button class="btn secondary sm" id="changeDirBtn">选择文件夹</button>
+        </div>
+      </label>
+    </section>
+
     <section class="card">
-      <h2 class="card__title">传输记录 <button class="btn ghost sm" id="clearBtn">清空</button></h2>
+      <h2 class="card__title">传输记录
+        <button class="btn ghost sm" id="clearReceivedBtn" title="清空收到的文件（同时删除磁盘文件）">清空收到</button>
+        <button class="btn danger sm" id="clearBtn" title="清空全部历史（仅清记录，不删磁盘文件）">清空历史</button>
+      </h2>
       <ul class="timeline" id="transferLog"></ul>
     </section>
   </main>
+
+  <!-- 拖拽即发：未选设备时弹出的设备选择浮层 -->
+  <div id="devicePicker" class="overlay hidden">
+    <div class="overlay-card">
+      <h3>选择发送设备</h3>
+      <p class="overlay-hint">拖入的文件将发送到所选设备，并记住此选择以便下次拖拽即发。</p>
+      <select id="pickerDevice"></select>
+      <div class="overlay-actions">
+        <button class="btn ghost sm" id="pickerCancel">取消</button>
+        <button class="btn primary sm" id="pickerConfirm">发送</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast"></div>
   <script src="app.js"></script>

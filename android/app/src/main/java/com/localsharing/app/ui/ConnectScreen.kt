@@ -49,11 +49,27 @@ fun ConnectScreen(vm: ShareViewModel, onScan: () -> Unit) {
     var code by remember { mutableStateOf("") }
     val conn by vm.connState.collectAsState()
     val error by vm.error.collectAsState()
+    val pending by vm.pendingShare.collectAsState()
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
     ) {
+        // 系统分享暂存提示：连接电脑后会自动填入发送列表（不阻塞连接流程）
+        if (pending.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+            ) {
+                Text(
+                    "已收到 ${pending.size} 个文件，连接电脑后将自动填入发送列表",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.padding(16.dp),
+                )
+            }
+        }
+
         // 品牌 header
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 20.dp)) {
             BrandMark()

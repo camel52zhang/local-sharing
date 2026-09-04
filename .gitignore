@@ -14,3 +14,18 @@ desktop/data/outbox/
 # 系统
 .DS_Store
 *.log
+
+# ===== 发布产物与大型二进制（体积大，禁止入库）=====
+# 约 682MB：根目录安装包/便携包 ~519MB + deliverables/portable ~163MB
+# 警告：这些是构建产物，可从源码重新生成；入库会永久膨胀 git 历史且极难清理
+*.zip
+*.exe
+*.msi
+
+# 便携版打包暂存区（含完整运行时，~258MB）
+desktop/portable-staging/
+portable-staging/
+
+# 分发补丁副本（与主源码重复，易产生分叉，非源码真值）
+desktop-source-patch/
+deliverables/portable/

@@ -1,0 +1,79 @@
+classDiagram
+    %% ===== 桌面端 =====
+    class Settings {
+        +string downloadDir
+        +string lastDeviceId
+        +loadSettings() Settings
+        +saveSettings(s) void
+    }
+
+    class HistoryStore {
+        +string historyPath
+        +loadHistory() ActivityItem[]
+        +saveHistory(items) void
+        +appendActivity(item) void
+        +clearHistory() void
+    }
+
+    class ActivityItem {
+        +string id
+        +'in'|'out' direction
+        +string name
+        +number size
+        +TransferKind kind
+        +string deviceName
+        +TransferStatus status
+        +number time
+        +string savedPath
+    }
+
+    class Services {
+        +Map~string,Device~ devices
+        +ReceivedFile[] received
+        +Transfer[] outgoing
+        +recordReceived(device, files, asFolder) ReceivedFile[]
+        +finalizeOutgoing(deviceId, files, asFolder) Transfer
+        +clearReceived() void
+        +listActivity() ActivityItem[]
+    }
+
+    class DashboardApp {
+        +buildApp() Express
+    }
+
+    Settings ..> HistoryStore : 同层持久化
+    Services --> HistoryStore : 变更时落盘
+    Services --> ActivityItem : 生成
+    DashboardApp --> Services : 调用
+
+    %% ===== Android 端 =====
+    class Prefs {
+        +isAutoSave(ctx) bool
+        +setAutoSave(ctx, on) void
+        +getSaveTreeUri(ctx) string?
+        +setSaveTreeUri(ctx, uri) void
+        +clearSaveTreeUri(ctx) void
+    }
+
+    class ShareViewModel {
+        +_savedSavedDirUri StateFlow~String?~
+        +saveDirUri : derived
+        +setSaveDir(uri) void
+        +clearSaveDir() void
+        +saveIncoming(transfer) void
+    }
+
+    class HomeScreen {
+        +openDocumentTreeContract : singleton
+        +pickSaveDir : launcher
+        +onPickSaveDirResult : stable cb
+    }
+
+    class OpenDocumentTreeContract {
+        <<ActivityResultContract>>
+    }
+
+    ShareViewModel --> Prefs : 读写 treeUri
+    HomeScreen --> ShareViewModel : setSaveDir()
+    HomeScreen --> OpenDocumentTreeContract : 复用单例
+    HomeScreen ..> ShareViewModel : saveIncoming 用目录

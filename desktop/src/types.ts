@@ -6,24 +6,26 @@ export interface Device {
   type: DeviceType;
   token: string;
   lastSeen: number;
-  /** 运行时持有 WebSocket 连接（不序列化） */
+  /** 运行时持有 WebSocket 连���（不序列化） */
   ws?: unknown;
 }
 
 export type TransferKind = 'file' | 'folder';
 export type TransferStatus = 'pending' | 'ready' | 'downloading' | 'completed' | 'failed';
 
-/** 活动流条目：合并“收到的文件(in)”与“发送历史(out)” */
+/** 活动流条目：合并"收到的文件(in)"与"发送历史(out)" */
 export interface ActivityItem {
   id: string;
   direction: 'in' | 'out';
   name: string;
   size: number;
   kind: TransferKind;
-  /** in: 来源设备名；out: 始终为“本机” */
+  /** in: 来源设备名；out: 始终为"本机" */
   deviceName: string;
   status: TransferStatus;
   time: number;
+  /** in 方向时记录服务器上的实际存储路径，供"打开文件夹"使用 */
+  savedPath?: string;
 }
 
 export interface Transfer {

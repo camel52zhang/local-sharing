@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import archiver from 'archiver';
-import { config, paths } from '../config';
+import { config, paths, loadHistory, appendHistory, clearHistory, updateSettings } from '../config';
 import {
   ActivityItem,
   Device,
@@ -34,9 +34,94 @@ const received: ReceivedFile[] = [];
 /** 发送历史（独立于会被清理的 transfers，用于活动流展示，保留状态） */
 const outgoing: Transfer[] = [];
 
-export function registerDevice(name: string, type: DeviceType): Device {
+/**
+ * 启动时从 data/history.json 回填内存中的 received / outgoing，
+ * 使活动流（收发记录）在应用重启后完整恢复。历史损坏时静默回退空。
+ */
+(function hydrateFromHistory(): void {
+  const items = loadHistory();
+  for (const it of items) {
+    if (it.direction === 'in') {
+      received.push({
+        id: it.id,
+        fromDeviceName: it.deviceName,
+        name: it.name,
+        size: it.size,
+        kind: it.kind,
+        savedPath: it.savedPath || '',
+        receivedAt: it.time,
+      });
+    } else {
+      outgoing.push({
+        id: it.id,
+        fromDeviceId: null,
+        toDeviceId: '',
+        name: it.name,
+        size: it.size,
+        kind: it.kind,
+        status: it.status,
+        filePath: '',
+        createdAt: it.time,
+      });
+    }
+  }
+})();
+
+/**
+ * 将一条活动项追加进持久化历史（变更即落盘）。
+ * 返回最新历史数组。
+ */
+function persistActivity(item: ActivityItem): ActivityItem[] {
+  return appendHistory(item);
+}
+
+/** 用当前内存中的 received / outgoing 重建并落盘完整活动流（用于批量变更后同步） */
+function persistAllActivity(): void {
+  const items: ActivityItem[] = [];
+  for (const f of received) {
+    items.push({
+      id: f.id,
+      direction: 'in',
+      name: f.name,
+      size: f.size,
+      kind: f.kind,
+      deviceName: f.fromDeviceName,
+      status: 'completed',
+      time: f.receivedAt,
+      savedPath: f.savedPath,
+    });
+  }
+  for (const t of outgoing) {
+    items.push({
+      id: t.id,
+      direction: 'out',
+      name: t.name,
+      size: t.size,
+      kind: t.kind,
+      deviceName: '本机',
+      status: t.status,
+      time: t.createdAt,
+    });
+  }
+  // 按时间倒序，展示一致
+  items.sort((a, b) => b.time - a.time);
+  clearHistory();
+  for (const it of items) appendHistory(it);
+}
+
+export function registerDevice(name: string, type: DeviceType, clientId?: string): Device {
+  // 同一 clientId（同设备）再次注册时复用既有条目，仅刷新 name/token/lastSeen，
+  // 不再新建，避免同手机反复连接产生多个 Device。
+  if (clientId && devices.has(clientId)) {
+    const existing = devices.get(clientId)!;
+    existing.name = name || 'Unnamed Device';
+    existing.token = token();
+    existing.lastSeen = Date.now();
+    emitDeviceList();
+    return existing;
+  }
   const device: Device = {
-    id: id('dev'),
+    id: clientId && clientId.length > 0 ? clientId : id('dev'),
     name: name || 'Unnamed Device',
     type,
     token: token(),
@@ -90,7 +175,7 @@ export function listReceived(): ReceivedFile[] {
   return received.slice().reverse();
 }
 
-/** 合并“收到的文件(in)”与“发送历史(out)”，按时间倒序，供活动流展示 */
+/** 合并"收到的文件(in)"与"发送历史(out)"，按时间倒序，供活动流展示 */
 export function listActivity(): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const f of received) {
@@ -103,6 +188,7 @@ export function listActivity(): ActivityItem[] {
       deviceName: f.fromDeviceName,
       status: 'completed',
       time: f.receivedAt,
+      savedPath: f.savedPath,
     });
   }
   for (const t of outgoing) {
@@ -121,22 +207,44 @@ export function listActivity(): ActivityItem[] {
   return items;
 }
 
-/** 删除单条“收到的文件”记录（同时删除磁盘文件，缺失则忽略） */
+/** 删除单条"收到的文件"记录（同时删除磁盘文件，缺失则忽略） */
 export function removeReceived(fileId: string): boolean {
   const idx = received.findIndex((f) => f.id === fileId);
   if (idx < 0) return false;
   const f = received[idx];
   safeUnlink(f.savedPath);
   received.splice(idx, 1);
+  // 同步持久化历史，避免删除的记录在重启后从 history.json 复活（与 clearReceived 保持一致）
+  persistAllActivity();
   bus.emit('received-removed', { fileId });
   return true;
 }
 
-/** 清空“收到的文件”记录与磁盘文件 */
+/** 清空"收到的文件"记录与磁盘文件 */
 export function clearReceived(): void {
   for (const f of received) safeUnlink(f.savedPath);
   received.length = 0;
+  // 同步持久化历史（仅清收到的部分，不影响发送历史）
+  persistAllActivity();
   bus.emit('received-removed', { fileId: '*' });
+}
+
+/**
+ * 清空全部历史（收到的 + 发送的）。
+ * 注意：仅清记录，不删除磁盘上已落盘的实际文件（防误删）。
+ * 清空后历史文件置空，emit 'history-cleared' 供前端刷新。
+ */
+export function clearAllHistory(): void {
+  // 仅清内存视图，不触碰磁盘文件
+  received.length = 0;
+  outgoing.length = 0;
+  for (const t of transfers.keys()) {
+    const t2 = transfers.get(t);
+    if (t2) safeUnlink(t2.filePath);
+    transfers.delete(t);
+  }
+  clearHistory();
+  bus.emit('history-cleared', {});
 }
 
 function emitDeviceList(): void {
@@ -179,6 +287,18 @@ export function recordReceived(
     };
     received.push(rf);
     results.push(rf);
+    // 落盘活动记录
+    persistActivity({
+      id: rf.id,
+      direction: 'in',
+      name: rf.name,
+      size: rf.size,
+      kind: rf.kind,
+      deviceName: rf.fromDeviceName,
+      status: 'completed',
+      time: rf.receivedAt,
+      savedPath: rf.savedPath,
+    });
   }
   bus.emit('upload-received', { files: results });
   return results;
@@ -241,6 +361,23 @@ export async function finalizeOutgoing(
   // 记录到发送历史（与 transfers 同一引用，状态变更会同步）
   outgoing.push(transfer);
 
+  // 落盘发送活动记录，并记忆“上次发送设备”
+  persistActivity({
+    id: transfer.id,
+    direction: 'out',
+    name: transfer.name,
+    size: transfer.size,
+    kind: transfer.kind,
+    deviceName: '本机',
+    status: transfer.status,
+    time: transfer.createdAt,
+  });
+  try {
+    updateSettings({ lastDeviceId: deviceId });
+  } catch {
+    /* 记忆失败不致命 */
+  }
+
   bus.emit('incoming', { deviceId, transfer });
 
   // ACK 超时：手机未在阈值内确认接收则标记为失败并清理临时文件
@@ -250,6 +387,8 @@ export async function finalizeOutgoing(
       t.status = 'failed';
       safeUnlink(t.filePath);
       transfers.delete(transferId);
+      // 同步更新持久化历史中的状态
+      persistAllActivity();
       bus.emit('transfer-failed', { transferId });
     }
   }, ACK_TIMEOUT_MS).unref();
@@ -269,6 +408,8 @@ export function completeTransfer(transferId: string): void {
   // 传输完成后清理临时文件
   safeUnlink(t.filePath);
   transfers.delete(transferId);
+  // 同步更新持久化历史中的状态
+  persistAllActivity();
 }
 
 // ---- 工具 ----
@@ -279,8 +420,39 @@ function zipFiles(
   return new Promise((resolve, reject) => {
     const output = fs.createWriteStream(dest);
     const archive = archiver('zip', { zlib: { level: 9 } });
-    output.on('close', () => resolve());
-    archive.on('error', (err: Error) => reject(err));
+    // archive 与 output 可能同时报错，用标志位保证 settle 只发生一次，
+    // 避免二次 reject/resolve 触发 unhandled rejection
+    let settled = false;
+
+    /** 失败收尾：中止归档、关闭写流、删除半截 zip，然后 reject（仅生效一次） */
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        archive.abort();
+      } catch {
+        /* archiver 已结束/不支持 abort 时忽略 */
+      }
+      try {
+        output.destroy();
+      } catch {
+        /* 流已关闭时忽略 */
+      }
+      // 清理半截 zip，避免残留损坏文件
+      safeUnlink(dest);
+      reject(err);
+    };
+
+    output.on('close', () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    });
+    // 必须监听写流错误：磁盘满/权限不足时 close 不会触发，
+    // 若无人接管 error，Promise 将永不 settle，HTTP 请求会永久挂起
+    output.on('error', (err: Error) => fail(err));
+    archive.on('error', (err: Error) => fail(err));
+
     archive.pipe(output);
     for (const e of entries) {
       if (fs.existsSync(e.src)) archive.file(e.src, { name: e.entry });

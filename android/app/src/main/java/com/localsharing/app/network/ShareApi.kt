@@ -46,11 +46,13 @@ object ShareApi {
         name: String,
         type: String,
         code: String?,
+        clientId: String = "",
     ): RegisterResult = withContext(Dispatchers.IO) {
         val body = okhttp3.FormBody.Builder()
             .add("name", name)
             .add("type", type)
             .apply { if (!code.isNullOrEmpty()) add("code", code) }
+            .apply { if (clientId.isNotEmpty()) add("clientId", clientId) }
             .build()
         val resp = client.newCall(
             Request.Builder().url("$baseUrl/api/devices").post(body).build(),
