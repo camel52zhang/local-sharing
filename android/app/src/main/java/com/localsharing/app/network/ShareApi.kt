@@ -106,9 +106,13 @@ object ShareApi {
         baseUrl: String,
         transferId: String,
         destFile: java.io.File,
+        token: String,
         onProgress: (sent: Long, total: Long) -> Unit,
     ): Boolean = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url("$baseUrl/api/transfer/$transferId").build()
+        val req = Request.Builder()
+            .url("$baseUrl/api/transfer/$transferId")
+            .header("X-Token", token)
+            .build()
         return@withContext try {
             val resp = client.newCall(req).execute()
             if (!resp.isSuccessful) return@withContext false

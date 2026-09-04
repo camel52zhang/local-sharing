@@ -17,11 +17,11 @@ import java.util.zip.ZipOutputStream
 
 private const val TAG = "FileUtil"
 
-/** zip 解压防护：单压缩包允许的最大条目数（防 zip bomb 打爆文件数） */
-private const val MAX_ZIP_ENTRIES = 10_000
+/** zip 解压防护：单压缩包允许的最大条目数（防 zip bomb 打爆文件数）。SAF 解压（extractZipToTree）同样适用 */
+internal const val MAX_ZIP_ENTRIES = 10_000
 
-/** zip 解压防护：单压缩包允许解压出的最大总字节数（2GB，防 zip bomb 打满存储） */
-private const val MAX_ZIP_TOTAL_BYTES = 2L * 1024 * 1024 * 1024
+/** zip 解压防护：单压缩包允许解压出的最大总字节数（2GB，防 zip bomb 打满存储）。SAF 解压同样适用 */
+internal const val MAX_ZIP_TOTAL_BYTES = 2L * 1024 * 1024 * 1024
 
 /** 解压拷贝缓冲区大小（字节） */
 private const val COPY_BUFFER_SIZE = 8 * 1024

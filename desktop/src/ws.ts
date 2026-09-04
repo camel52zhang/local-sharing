@@ -14,7 +14,12 @@ export function createHub(httpServer: HttpServer): void {
     const role = url.searchParams.get('role');
 
     if (role === 'pc') {
-      // 电脑端仪表盘连接，仅用于接收实时事件
+      // 电脑端仪表盘连接，仅用于接收实时事件；仅允许本机回环（局域网设备/恶意页面不可订阅事件流）
+      const addr = req.socket.remoteAddress || '';
+      if (addr !== '127.0.0.1' && addr !== '::1' && addr !== '::ffff:127.0.0.1') {
+        ws.close(4004, 'PC dashboard only from localhost');
+        return;
+      }
       pcSockets.add(ws);
       ws.on('close', () => pcSockets.delete(ws));
       ws.on('error', () => pcSockets.delete(ws));

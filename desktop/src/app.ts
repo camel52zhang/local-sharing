@@ -3,6 +3,7 @@ import cors from 'cors';
 import multer from 'multer';
 import { exec } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import QRCode from 'qrcode';
 import { config, paths, ensureDirs, loadSettings, updateSettings, getEffectiveDownloadDir } from './config';
@@ -26,6 +27,7 @@ import {
   shareCode,
 } from './services/services';
 import { DeviceType } from './types';
+import { APP_VERSION } from './version';
 
 ensureDirs();
 
@@ -100,6 +102,48 @@ export function buildApp(): express.Express {
   // 必须显式启用 urlencoded 解析，否则 req.body 为 undefined，name/type/clientId 均取不到。
   app.use(express.urlencoded({ extended: false }));
 
+  // ---- 信任边界防护 ----
+  /**
+   * Host/Origin 白名单：仅允许 IP 字面量、localhost 与本机主机名。
+   * 阻断 DNS rebinding（恶意域名解析到内网地址后 Host 为攻击域名）与跨站请求（Origin 为攻击站点）。
+   */
+  const isTrustedHost = (hostHeader: string | undefined): boolean => {
+    if (!hostHeader) return false;
+    let host = hostHeader.split(':')[0].trim();
+    if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return true; // IPv4 字面量
+    if (host.includes(':')) return true; // IPv6 字面量
+    const lower = host.toLowerCase();
+    return lower === 'localhost' || lower === os.hostname().toLowerCase();
+  };
+  app.use((req, res, next) => {
+    if (!isTrustedHost(req.headers.host)) {
+      return res.status(403).json({ error: 'invalid_host' });
+    }
+    const origin = req.headers.origin as string | undefined;
+    if (origin) {
+      try {
+        if (!isTrustedHost(new URL(origin).host)) {
+          return res.status(403).json({ error: 'invalid_origin' });
+        }
+      } catch {
+        return res.status(403).json({ error: 'invalid_origin' });
+      }
+    }
+    next();
+  });
+
+  /**
+   * 仪表盘专用 API 仅限本机回环访问。
+   * 手机只调用 info/register/upload/transfer 系列；列表、删除、设置、打开目录等
+   * 管理面接口不允许局域网其他设备触达。
+   */
+  const localOnly = (req: Request, res: Response, next: NextFunction) => {
+    const addr = req.socket.remoteAddress || '';
+    if (addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1') return next();
+    res.status(403).json({ error: 'local_only' });
+  };
+
   // 为 transfer/out 生成临时目录 id
   app.use('/api/transfer/out', (req: any, _res, next) => {
     req.tmpId = `up_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -113,6 +157,7 @@ export function buildApp(): express.Express {
   app.get('/api/info', (_req, res) => {
     res.json({
       name: config.deviceName,
+      version: APP_VERSION,
       port: config.port,
       lanIp,
       connectUrl,
@@ -152,7 +197,7 @@ export function buildApp(): express.Express {
   });
 
   // ---- 设备列表（电脑端仪表盘） ----
-  app.get('/api/devices', (_req, res) => {
+  app.get('/api/devices', localOnly, (_req, res) => {
     res.json({
       devices: listDevices().map((d) => ({
         id: d.id,
@@ -165,35 +210,36 @@ export function buildApp(): express.Express {
   });
 
   // ---- 接收文件列表 ----
-  app.get('/api/received', (_req, res) => {
+  app.get('/api/received', localOnly, (_req, res) => {
     res.json({ files: listReceived() });
   });
 
   // ---- 统一活动流（收到的文件 + 发送历史） ----
-  app.get('/api/activity', (_req, res) => {
+  app.get('/api/activity', localOnly, (_req, res) => {
     res.json({ activities: listActivity() });
   });
 
   // ---- 删除单条"收到的文件" ----
-  app.delete('/api/received/:id', (req, res) => {
+  app.delete('/api/received/:id', localOnly, (req, res) => {
     const ok = removeReceived(req.params.id);
     if (!ok) return res.status(404).json({ error: 'not_found' });
     res.json({ ok: true });
   });
 
   // ---- 清空"收到的文件" ----
-  app.delete('/api/received', (_req, res) => {
+  app.delete('/api/received', localOnly, (_req, res) => {
     clearReceived();
     res.json({ ok: true });
   });
 
   // ---- 手机 → 电脑：上传 ----
   app.post('/api/upload', (req: any, res, next) => {
+    // 先鉴权再落盘：无效 token 直接 401，不在磁盘留下孤儿文件
+    const device = authenticate(req.headers['x-token'] as string);
+    if (!device) return res.status(401).json({ error: 'unauthorized' });
     upload.any()(req, res, (err: any) => {
       if (err) return next(new HttpError(400, err.message));
       try {
-        const device = authenticate(req.headers['x-token'] as string);
-        if (!device) return res.status(401).json({ error: 'unauthorized' });
         const files = (req.files || []).map((f: any) => ({
           name: decodeFilename(f.originalname),
           savedPath: f.path,
@@ -236,6 +282,9 @@ export function buildApp(): express.Express {
   // ---- 手机拉取传输文件 ----
   app.get('/api/transfer/:id', (req, res, next) => {
     try {
+      // 能力地址 id 本身不可枚举，但仍要求持有设备 token（传输内容凭据双保险）
+      const device = authenticate(req.headers['x-token'] as string);
+      if (!device) return res.status(401).json({ error: 'unauthorized' });
       const t = getTransfer(req.params.id);
       if (!t) return res.status(404).json({ error: 'not_found' });
       res.download(t.filePath, t.name, (err) => {
@@ -253,11 +302,11 @@ export function buildApp(): express.Express {
   });
 
   // ---- 用户设置 ----
-  app.get('/api/settings', (_req, res) => {
+  app.get('/api/settings', localOnly, (_req, res) => {
     res.json(loadSettings());
   });
 
-  app.post('/api/settings', (req, res) => {
+  app.post('/api/settings', localOnly, (req, res) => {
     const { downloadDir, lastDeviceId } = req.body;
     if (downloadDir && !fs.existsSync(downloadDir)) {
       return res.status(400).json({ error: '目录不存在' });
@@ -270,13 +319,13 @@ export function buildApp(): express.Express {
   });
 
   // ---- 清空全部历史（仅清记录，不删磁盘文件） ----
-  app.delete('/api/history', (_req, res) => {
+  app.delete('/api/history', localOnly, (_req, res) => {
     clearAllHistory();
     res.json({ ok: true });
   });
 
   // ---- 在系统资源管理器中打开文件所在位置 ----
-  app.post('/api/open-folder', (req, res) => {
+  app.post('/api/open-folder', localOnly, (req, res) => {
     const filePath: string | undefined = req.body?.path;
     if (!filePath || !fs.existsSync(filePath)) {
       return res.status(404).json({ error: '文件不存在' });
@@ -295,7 +344,7 @@ export function buildApp(): express.Express {
   // ---- 弹出系统文件夹选择对话框，返回所选绝对路径 ----
   // 用 PowerShell 的 Shell.Application.BrowseForFolder（BIF_USENEWUI 现代风格），
   // 避免改动 Rust/重编。仅 Windows 支持。
-  app.post('/api/pick-folder', (_req, res) => {
+  app.post('/api/pick-folder', localOnly, (_req, res) => {
     if (process.platform !== 'win32') {
       return res.status(400).json({ error: 'unsupported_platform' });
     }

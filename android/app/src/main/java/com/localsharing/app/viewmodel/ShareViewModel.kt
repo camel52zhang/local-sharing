@@ -15,6 +15,8 @@ import com.localsharing.app.model.SavedFile
 import com.localsharing.app.network.ShareApi
 import com.localsharing.app.network.ShareWebSocket
 import com.localsharing.app.network.WsEvent
+import com.localsharing.app.util.MAX_ZIP_ENTRIES
+import com.localsharing.app.util.MAX_ZIP_TOTAL_BYTES
 import com.localsharing.app.util.Prefs
 import com.localsharing.app.util.extractZip
 import com.localsharing.app.util.getDisplayName
@@ -288,7 +290,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         val tmpFile = File(ctx.cacheDir, "incoming_${System.currentTimeMillis()}_${transfer.name}")
         _incoming.update { it.map { t -> if (t.id == transfer.id) t.copy(saving = true, progress = 0f) else t } }
         viewModelScope.launch {
-            val ok = ShareApi.downloadFile(_baseUrl.value, transfer.id, tmpFile) { sent, total ->
+            val ok = ShareApi.downloadFile(_baseUrl.value, transfer.id, tmpFile, _token.value) { sent, total ->
                 val p = if (total > 0) sent.toFloat() / total else 0f
                 _incoming.update { list -> list.map { t -> if (t.id == transfer.id) t.copy(progress = p) else t } }
             }
@@ -389,13 +391,26 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         return dest.absolutePath to kind
     }
 
-    /** 将 zip 解压进 SAF 树目录 */
+    /**
+     * 将 zip 解压进 SAF 树目录（条目数/总字节受限，防 zip bomb 打满存储；
+     * SAF 文档 ID 天然约束在树 URI 内，无文件系统路径穿越风险）。
+     */
     private fun extractZipToTree(zipFile: File, dirDoc: androidx.documentfile.provider.DocumentFile): Boolean {
+        var entryCount = 0
+        var totalBytes = 0L
+        val buf = ByteArray(8192)
         return try {
+            var limitExceeded = false
             val zis = java.util.zip.ZipInputStream(java.io.BufferedInputStream(java.io.FileInputStream(zipFile)))
             zis.use { z ->
                 var entry = z.nextEntry
-                while (entry != null) {
+                while (entry != null && !limitExceeded) {
+                    entryCount++
+                    if (entryCount > MAX_ZIP_ENTRIES) {
+                        Log.w("ShareViewModel", "zip 条目数超过上限 $MAX_ZIP_ENTRIES，中止解压")
+                        limitExceeded = true
+                        break
+                    }
                     val name = entry.name ?: run { entry = z.nextEntry; "" }
                     if (name.isEmpty()) continue
                     if (entry.isDirectory) {
@@ -409,7 +424,16 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                         val fileDoc = targetDir.createFile(guessMime(fileName), fileName)
                         fileDoc?.uri?.let { uri ->
                             getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
-                                z.copyTo(out)
+                                var read: Int
+                                while (z.read(buf).also { read = it } != -1) {
+                                    totalBytes += read
+                                    if (totalBytes > MAX_ZIP_TOTAL_BYTES) {
+                                        Log.w("ShareViewModel", "解压总字节超过上限 $MAX_ZIP_TOTAL_BYTES，中止解压")
+                                        limitExceeded = true
+                                        break
+                                    }
+                                    out.write(buf, 0, read)
+                                }
                             }
                         }
                     }
@@ -417,7 +441,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                     entry = z.nextEntry
                 }
             }
-            true
+            !limitExceeded
         } catch (e: Exception) {
             Log.e("ShareViewModel", "extractZipToTree failed: ${e.message}")
             false
