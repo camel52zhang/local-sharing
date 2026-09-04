@@ -130,6 +130,18 @@ export function appendHistory(item: ActivityItem): ActivityItem[] {
   return items;
 }
 
+/**
+ * 批量追加活动并一次性落盘。
+ * 逐条 appendHistory 会造成 O(N²) 的全量读-改-写，多文件上传时改用本函数。
+ */
+export function appendHistoryBulk(items: ActivityItem[]): ActivityItem[] {
+  if (items.length === 0) return loadHistory();
+  const all = loadHistory();
+  all.push(...items);
+  saveHistory(all);
+  return all;
+}
+
 /** 清空全部历史（仅清记录，不删磁盘实际文件） */
 export function clearHistory(): ActivityItem[] {
   saveHistory([]);

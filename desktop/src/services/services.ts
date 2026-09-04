@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import archiver from 'archiver';
-import { config, paths, loadHistory, appendHistory, clearHistory, updateSettings } from '../config';
+import { config, paths, loadHistory, appendHistory, appendHistoryBulk, saveHistory, clearHistory, updateSettings } from '../config';
 import {
   ActivityItem,
   Device,
@@ -16,8 +16,19 @@ import {
 /** 服务层向实时层广播事件的轻量总线 */
 export const bus = new EventEmitter();
 
-/** PC→手机 发送后、ACK 超时阈值（毫秒）。超时未确认则标记为失败。 */
-const ACK_TIMEOUT_MS = 60_000;
+/**
+ * PC→手机 发送后、ACK 超时阈值。
+ * 固定 60s 会让大文件必失败（手机还没拉完就被判死并删除临时文件），
+ * 因此：基准 60s + 按文件大小给传输时间（按保守 1MB/s 拉取速率估算，每 MB 追加 1s，另加 30s 余量）。
+ */
+const ACK_BASE_TIMEOUT_MS = 60_000;
+const ACK_TIMEOUT_PER_MB_MS = 1_000;
+const ACK_TIMEOUT_HEADROOM_MS = 30_000;
+
+function ackTimeoutMs(sizeBytes: number): number {
+  const mb = Math.ceil(sizeBytes / (1024 * 1024));
+  return ACK_BASE_TIMEOUT_MS + mb * ACK_TIMEOUT_PER_MB_MS + ACK_TIMEOUT_HEADROOM_MS;
+}
 
 function id(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
@@ -105,8 +116,8 @@ function persistAllActivity(): void {
   }
   // 按时间倒序，展示一致
   items.sort((a, b) => b.time - a.time);
-  clearHistory();
-  for (const it of items) appendHistory(it);
+  // 一次性全量落盘（此前逐条 appendHistory 会造成 O(N²) 的读-改-写）
+  saveHistory(items);
 }
 
 export function registerDevice(name: string, type: DeviceType, clientId?: string): Device {
@@ -274,6 +285,7 @@ export function recordReceived(
   asFolder: boolean,
 ): ReceivedFile[] {
   const results: ReceivedFile[] = [];
+  const historyItems: ActivityItem[] = [];
   for (const f of files) {
     const isFolder = asFolder || f.name.toLowerCase().endsWith('.zip');
     const rf: ReceivedFile = {
@@ -287,8 +299,7 @@ export function recordReceived(
     };
     received.push(rf);
     results.push(rf);
-    // 落盘活动记录
-    persistActivity({
+    historyItems.push({
       id: rf.id,
       direction: 'in',
       name: rf.name,
@@ -300,6 +311,8 @@ export function recordReceived(
       savedPath: rf.savedPath,
     });
   }
+  // 多文件只落盘一次（逐条 appendHistory 会造成 O(N²) 读-改-写）
+  if (historyItems.length > 0) appendHistoryBulk(historyItems);
   bus.emit('upload-received', { files: results });
   return results;
 }
@@ -391,7 +404,7 @@ export async function finalizeOutgoing(
       persistAllActivity();
       bus.emit('transfer-failed', { transferId });
     }
-  }, ACK_TIMEOUT_MS).unref();
+  }, ackTimeoutMs(transfer.size)).unref();
 
   return transfer;
 }

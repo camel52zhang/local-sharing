@@ -56,7 +56,9 @@ import com.localsharing.app.util.formatSize
 import com.localsharing.app.util.zipUris
 import com.localsharing.app.viewmodel.ConnState
 import com.localsharing.app.viewmodel.ShareViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 // contract 必须是稳定单例：内联 new 会在每次重组时生成新实例，导致 rememberLauncherForActivityResult
@@ -117,12 +119,21 @@ fun HomeScreen(vm: ShareViewModel) {
         { treeUri: Uri? ->
             try {
                 if (treeUri != null) {
-                    val uris = walkTree(context, treeUri)
-                    if (uris.isNotEmpty()) {
-                        val treeName = DocumentFile.fromTreeUri(context, treeUri)?.name ?: "folder"
-                        val zipFile = File(context.cacheDir, "$treeName.zip")
-                        scope.launch {
+                    scope.launch {
+                        // SAF 遍历是逐文件 IPC，大目录在主线程会 ANR：切到 IO
+                        val uris = try {
+                            withContext(Dispatchers.IO) { walkTree(context, treeUri) }
+                        } catch (e: Exception) {
+                            Log.e("HomeScreen", "pickFolder failed: ${e.message}")
+                            vm.reportError("选择文件夹失败：${e.message ?: "未知错误"}")
+                            return@launch
+                        }
+                        if (uris.isNotEmpty()) {
                             try {
+                                val treeName = withContext(Dispatchers.IO) {
+                                    DocumentFile.fromTreeUri(context, treeUri)?.name
+                                } ?: "folder"
+                                val zipFile = File(context.cacheDir, "$treeName.zip")
                                 val ok = zipUris(context, uris, zipFile.absolutePath)
                                 if (ok) {
                                     val item = OutgoingItem(

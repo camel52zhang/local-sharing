@@ -22,6 +22,7 @@ import com.localsharing.app.util.getSize
 import com.localsharing.app.util.isSafeChild
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -304,16 +305,17 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 try { android.net.Uri.parse(treeUriStr) } catch (_: Exception) { null }
             } else null
 
+            // SAF/MediaStore 写入与 zip 解压均为重 IO/IPC：切到 IO 线程，避免主线程 ANR
             val result = if (targetTreeUri != null) {
                 // 写入 SAF 树目录；目录失效（读取失败）时静默回退 Downloads
                 try {
-                    writeToTree(ctx, targetTreeUri, transfer, tmpFile)
+                    withContext(Dispatchers.IO) { writeToTree(ctx, targetTreeUri, transfer, tmpFile) }
                 } catch (e: Exception) {
                     Log.w("ShareViewModel", "writeToTree failed, fallback Downloads: ${e.message}")
-                    writeToDownloads(ctx, transfer, tmpFile)
+                    withContext(Dispatchers.IO) { writeToDownloads(ctx, transfer, tmpFile) }
                 }
             } else {
-                writeToDownloads(ctx, transfer, tmpFile)
+                withContext(Dispatchers.IO) { writeToDownloads(ctx, transfer, tmpFile) }
             }
 
             if (result != null) {
