@@ -1,12 +1,12 @@
 name: Build & Release
 
 # 触发：
-# - push 到 master：构建并上传 Actions Artifacts（日常测试）
+# - push 到 main：构建并上传 Actions Artifacts（日常测试）
 # - push v* tag：构建并发布到 GitHub Releases（正式发布）
 # - 手动：Actions 页 Run workflow
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
