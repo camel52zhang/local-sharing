@@ -1,3 +1,6 @@
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -45,16 +48,11 @@ android {
         kotlinCompilerExtensionVersion = "1.5.15"
     }
 
-    val appVersionName = defaultConfig.versionName ?: "0.1.0"
+    val buildDate = LocalDate.now().format(DateTimeFormatter.ofPattern("yy.MM.dd"))
     applicationVariants.all {
-        val variantName = buildType.name
         outputs.all {
             val out = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            out.outputFileName = if (variantName == "debug") {
-                "local-sharing_${appVersionName}.apk"
-            } else {
-                "local-sharing_${appVersionName}-${variantName}.apk"
-            }
+            out.outputFileName = "local-sharing_v${buildDate}.apk"
         }
     }
 }

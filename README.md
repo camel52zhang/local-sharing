@@ -109,8 +109,8 @@ local-sharing/
 
 已发布安装包与便携版（当前 `v0.1.3`），直接取用即可：
 
-- `local-sharing_0.1.3_x64-setup.exe` —— NSIS 安装包（当前用户模式安装，无需管理员）。
-- `local-sharing_0.1.3_x64-portable.zip` —— 免安装便携版，解压即跑。
+- `local-sharing_vYY.MM.DD_x64-setup.exe` —— NSIS 安装包（当前用户模式安装，无需管理员；文件名按构建日期生成）。
+- `local-sharing_vYY.MM.DD_x64-portable.zip` —— 免安装便携版，解压即跑（文件名按构建日期生成）。
 
 **安装与运行**
 
@@ -173,9 +173,9 @@ npm run tauri:build
 
 ```bash
 cd android
-./gradlew assembleDebug     # 输出 app/build/outputs/apk/debug/local-sharing_0.1.3.apk（即 local-sharing_<版本号>.apk）
+./gradlew assembleDebug     # 输出 app/build/outputs/apk/debug/local-sharing_vYY.MM.DD.apk（即 local-sharing_v<构建日期 yy.MM.dd>.apk）
 # 正式发布包（需先配置签名，见下）：
-./gradlew assembleRelease   # 输出 local-sharing_0.1.3-release.apk（即 local-sharing_<版本号>-release.apk）
+./gradlew assembleRelease   # 输出 local-sharing_vYY.MM.DD.apk（即 local-sharing_v<构建日期 yy.MM.dd>.apk；debug 与 release 同名，不再带 -release 后缀）
 ```
 
 或用 Android Studio：`File / Open` 选择 `android/` → 等待 Gradle 同步 → `Build / Make Project` 或 `Run` 到设备。

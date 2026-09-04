@@ -2,7 +2,10 @@
 !include "LogicLib.nsh"
 
 Name "local-sharing"
-OutFile "D:\tools\WorkBuddy\Local-sharing\local-sharing\local-sharing_0.1.3_x64-setup.exe"
+!ifndef BUILD_DATE
+  !define BUILD_DATE "26.09.04"
+!endif
+OutFile "D:\tools\WorkBuddy\Local-sharing\local-sharing\local-sharing_v${BUILD_DATE}_x64-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\local-sharing"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
