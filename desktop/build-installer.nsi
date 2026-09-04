@@ -53,7 +53,7 @@ Section "Main" SEC01
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayIcon" "$\"$INSTDIR\local-sharing-desktop.exe$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "InstallLocation" "$\"$INSTDIR$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "Publisher" "local-sharing"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayVersion" "0.1.3"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayVersion" "v${BUILD_DATE}"
   Call InstallWebView2
 SectionEnd
 

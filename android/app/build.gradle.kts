@@ -1,6 +1,11 @@
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
+// 版本号 = 构建当日日期（vYY.MM.DD），与应用内版本（versionName）和产物文件名
+// （local-sharing_vYY.MM.DD.apk）保持一致；versionCode 取日期整数（如 260904），单调递增可覆盖升级
+val buildDate: String = LocalDate.now().format(DateTimeFormatter.ofPattern("yy.MM.dd"))
+val buildDateCode: Int = LocalDate.now().let { (it.year % 100) * 10000 + it.monthValue * 100 + it.dayOfMonth }
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -14,8 +19,8 @@ android {
         applicationId = "com.localsharing.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.1.3"
+        versionCode = buildDateCode
+        versionName = "v$buildDate"
     }
 
     buildTypes {
@@ -48,7 +53,6 @@ android {
         kotlinCompilerExtensionVersion = "1.5.15"
     }
 
-    val buildDate = LocalDate.now().format(DateTimeFormatter.ofPattern("yy.MM.dd"))
     applicationVariants.all {
         outputs.all {
             val out = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
