@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "node scripts/set-version.mjs && tauri build --bundles nsis && node scripts/post-build.mjs"
   },
   "dependencies": {
     "archiver": "^7.0.1",
