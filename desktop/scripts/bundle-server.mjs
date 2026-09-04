@@ -10,13 +10,8 @@ const root = path.resolve(scriptDir, '..'); // desktop/
 const serverRes = path.join(root, 'src-tauri', 'resources', 'server');
 const distSrc = path.join(root, 'dist');
 const nodeModulesSrc = path.join(root, 'node_modules');
-const nodeExeSrc = 'C:/Program Files/nodejs/node.exe';
-const nodeSidecarDst = path.join(
-  root,
-  'src-tauri',
-  'binaries',
-  'node-x86_64-pc-windows-gnu.exe'
-);
+// node.exe sidecar 直接取「当前运行本脚本的 node」，本机/CI 通用（不硬编码安装路径）
+const nodeExeSrc = process.execPath;
 
 // 1) 先确保 Node 服务已构建（tsc + 复制 src/public -> dist/public）
 console.log('[bundle] npm run build ...');
@@ -37,9 +32,15 @@ fs.mkdirSync(path.join(serverRes, 'dist'), { recursive: true });
 fs.cpSync(distSrc, path.join(serverRes, 'dist'), { recursive: true });
 fs.cpSync(nodeModulesSrc, path.join(serverRes, 'node_modules'), { recursive: true });
 
-// 3) 复制 node.exe 作为 sidecar（gnu triple 后缀，sidecar("node") 才能解析到）
-fs.mkdirSync(path.dirname(nodeSidecarDst), { recursive: true });
-fs.copyFileSync(nodeExeSrc, nodeSidecarDst);
-console.log('[bundle] node sidecar ->', nodeSidecarDst);
+// 3) 复制 node.exe 作为 sidecar。Tauri externalBin 按目标三元组解析文件名：
+//    本机 GNU 工具链 -> node-x86_64-pc-windows-gnu.exe；CI(MSVC) -> node-x86_64-pc-windows-msvc.exe。
+//    两个三元组都落一份，保证本机真编译与 GitHub CI 均可构建。
+const TRIPLES = ['x86_64-pc-windows-gnu', 'x86_64-pc-windows-msvc'];
+fs.mkdirSync(path.join(root, 'src-tauri', 'binaries'), { recursive: true });
+for (const triple of TRIPLES) {
+  const sidecarDst = path.join(root, 'src-tauri', 'binaries', `node-${triple}.exe`);
+  fs.copyFileSync(nodeExeSrc, sidecarDst);
+  console.log('[bundle] node sidecar ->', sidecarDst);
+}
 
 console.log('[bundle] bundle-server done');

@@ -1,0 +1,93 @@
+name: Build & Release
+
+# 触发：
+# - push 到 master：构建并上传 Actions Artifacts（日常测试）
+# - push v* tag：构建并发布到 GitHub Releases（正式发布）
+# - 手动：Actions 页 Run workflow
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: Desktop (Windows NSIS)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install deps
+        working-directory: desktop
+        run: npm install
+
+      # set-version 按北京时间当天日期写入 semver 版本 -> tauri build 真编译（内嵌版本与文件名同源）
+      # -> post-build 重命名为 local-sharing_vYY.MM.DD_x64-setup.exe
+      - name: Build (date version + rename)
+        working-directory: desktop
+        shell: bash
+        run: npm run tauri:build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-sharing-windows-setup
+          path: desktop/src-tauri/target/release/bundle/nsis/local-sharing_v*_x64-setup.exe
+          if-no-files-found: error
+
+      - name: Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/src-tauri/target/release/bundle/nsis/local-sharing_v*_x64-setup.exe
+
+  android:
+    name: Android (Debug APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # hosted runner 已预装 Android SDK 并预接受 license；此步兜底补齐
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      # TZ=Asia/Shanghai：Gradle 的 LocalDate.now() 取北京时间，APK 文件名/versionName
+      # 与桌面端（set-version 同为北京时间）保持同一天
+      - name: Build APK
+        working-directory: android
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-sharing-android-apk
+          path: android/app/build/outputs/apk/debug/local-sharing_v*.apk
+          if-no-files-found: error
+
+      - name: Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android/app/build/outputs/apk/debug/local-sharing_v*.apk
