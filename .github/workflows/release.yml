@@ -35,7 +35,7 @@ jobs:
         run: npm install
 
       # set-version 按北京时间当天日期写入 semver 版本 -> tauri build 真编译（内嵌版本与文件名同源）
-      # 产物 local-sharing_<YY.M.D semver>_x64-setup.exe（内部版本与文件名逐字符一致）
+      # 产物 local-sharing_vYY.MM.DD_x64-setup.exe（显示版，与 exe 内部 semver 同日恒等映射）
       - name: Build (date version + rename)
         working-directory: desktop
         shell: bash
@@ -45,14 +45,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: local-sharing-windows-setup
-          path: desktop/src-tauri/target/release/bundle/nsis/local-sharing_*_x64-setup.exe
+          path: desktop/src-tauri/target/release/bundle/nsis/local-sharing_v*_x64-setup.exe
           if-no-files-found: error
 
       - name: Release (tag only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: desktop/src-tauri/target/release/bundle/nsis/local-sharing_*_x64-setup.exe
+          files: desktop/src-tauri/target/release/bundle/nsis/local-sharing_v*_x64-setup.exe
 
   android:
     name: Android (Debug APK)
@@ -83,11 +83,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: local-sharing-android-apk
-          path: android/app/build/outputs/apk/debug/local-sharing_*.apk
+          path: android/app/build/outputs/apk/debug/local-sharing_v*.apk
           if-no-files-found: error
 
       - name: Release (tag only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: android/app/build/outputs/apk/debug/local-sharing_*.apk
+          files: android/app/build/outputs/apk/debug/local-sharing_v*.apk

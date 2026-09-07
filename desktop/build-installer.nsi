@@ -2,12 +2,12 @@
 !include "LogicLib.nsh"
 
 Name "local-sharing"
-; 版本用 semver 日期形式（YY.M.D，去前导零无 v），与 CI 产物/exe 内嵌版本逐字符一致
-; 例：makensis /DBUILD_VER=26.9.7 build-installer.nsi
-!ifndef BUILD_VER
-  !define BUILD_VER "26.9.7"
+; 外部显示版命名 vYY.MM.DD（补零），与 CI 产物名一致；exe 内部是同日 semver（26.9.7 式），恒等映射
+; 例：makensis /DBUILD_DATE=26.09.07 build-installer.nsi
+!ifndef BUILD_DATE
+  !define BUILD_DATE "26.09.07"
 !endif
-OutFile "D:\tools\WorkBuddy\Local-sharing\local-sharing\local-sharing_${BUILD_VER}_x64-setup.exe"
+OutFile "D:\tools\WorkBuddy\Local-sharing\local-sharing\local-sharing_v${BUILD_DATE}_x64-setup.exe"
 InstallDir "$LOCALAPPDATA\Programs\local-sharing"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
@@ -55,7 +55,7 @@ Section "Main" SEC01
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayIcon" "$\"$INSTDIR\local-sharing-desktop.exe$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "InstallLocation" "$\"$INSTDIR$\""
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "Publisher" "local-sharing"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayVersion" "${BUILD_VER}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\local-sharing" "DisplayVersion" "v${BUILD_DATE}"
   Call InstallWebView2
 SectionEnd
 
