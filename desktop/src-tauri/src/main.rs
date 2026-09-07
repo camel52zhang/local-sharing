@@ -1,3 +1,7 @@
+// release 构建使用 Windows GUI 子系统：不附带控制台窗口（关掉 cmd 不再会杀掉应用）。
+// debug 构建保留控制台，便于直接看 eprintln! 日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::io::Write;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
