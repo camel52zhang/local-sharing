@@ -107,10 +107,12 @@ local-sharing/
 
 ### 方式一：安装包（推荐，Tauri 打包）
 
-已发布安装包与便携版（当前 `v0.1.3`），直接取用即可：
+从 [GitHub Releases](https://github.com/camel52zhang/local-sharing/releases) 取正式版本，或在 [Actions](https://github.com/camel52zhang/local-sharing/actions) 各次运行的 Artifacts 里取日常测试构建：
 
 - `local-sharing_vYY.MM.DD_x64-setup.exe` —— NSIS 安装包（当前用户模式安装，无需管理员；文件名=构建日期补零显示版，exe 内部为同日 semver 26.9.7 式）。
 - `local-sharing_vYY.MM.DD_x64-portable.zip` —— 免安装便携版，解压即跑（文件名=构建日期补零显示版）。
+
+**版本号规则（双轨制）**：同一构建日期派生两个形式——内部 semver `26.9.7`（Cargo 约束，烧入 exe；exe 属性/注册表显示此形式）与外部显示版 `v26.09.07`（产物文件名、应用内显示、安卓 versionName）。二者恒等映射；`versionCode` 为日期整数（260907）。
 
 **安装与运行**
 
@@ -150,14 +152,18 @@ npm run build && npm start
 | `DATA_DIR`        | ./data      | 数据存储目录（received/outbox/settings.json/history.json） |
 | `DISCOVER_LAN_IP` | true        | 是否探测并展示局域网 IP |
 
-**打包桌面安装版**
+**打包桌面安装版（本地）**
 
 ```bash
 cd desktop
 npm run tauri:build
 ```
 
-产物位于 `desktop/src-tauri/target/release/bundle/`（`nsis/` 下为 `setup.exe`，另含便携压缩包）。该命令会先执行 `scripts/bundle-server.mjs`：编译 Node 服务、将其与 `node_modules` 复制进 `resources/server`、并把 `node.exe` 作为 sidecar 一并打包。
+产物位于 `desktop/src-tauri/target/release/bundle/`（`nsis/` 下为 `setup.exe`，另含便携压缩包）。该命令会先执行 `scripts/bundle-server.mjs`：编译 Node 服务、将其与 `node_modules` 复制进 `resources/server`、并把 `node.exe` 作为 sidecar 一并打包；随后 `scripts/set-version.mjs` 按北京时间当天日期注入版本、`scripts/post-build.mjs` 将产物重命名为 `local-sharing_vYY.MM.DD_x64-setup.exe`。
+
+**GitHub Actions 自动构建**
+
+推送到 `main` 分支即触发双端构建（桌面 Windows NSIS 真编译 + 安卓 APK），产物在该次运行的 Artifacts 中；推送 `vYY.MM.DD` 形式的 tag（如 `v26.09.07`）会额外发布到 GitHub Releases。CI 上 exe 为从源码真编译，内嵌版本与文件名同日同源。
 
 ---
 
