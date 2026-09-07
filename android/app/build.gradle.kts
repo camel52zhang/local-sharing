@@ -1,9 +1,9 @@
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 
-// 版本号 = 构建当日日期（vYY.MM.DD），与应用内版本（versionName）和产物文件名
-// （local-sharing_vYY.MM.DD.apk）保持一致；versionCode 取日期整数（如 260904），单调递增可覆盖升级
-val buildDate: String = LocalDate.now().format(DateTimeFormatter.ofPattern("yy.MM.dd"))
+// 版本号 = 构建当日日期的 semver 形式（YY.M.D，去前导零，与桌面端 set-version.mjs 同规则），
+// 全链路逐字符一致：versionName = APK 文件名 = 桌面 exe 内嵌版本/文件名。
+// 例：2026-09-07 -> 26.9.7 -> local-sharing_26.9.7.apk；versionCode 取日期整数（260907），单调递增可覆盖升级
+val buildVersion: String = LocalDate.now().let { "${it.year % 100}.${it.monthValue}.${it.dayOfMonth}" }
 val buildDateCode: Int = LocalDate.now().let { (it.year % 100) * 10000 + it.monthValue * 100 + it.dayOfMonth }
 
 plugins {
@@ -20,7 +20,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = buildDateCode
-        versionName = "v$buildDate"
+        versionName = buildVersion
     }
 
     buildTypes {
@@ -56,7 +56,7 @@ android {
     applicationVariants.all {
         outputs.all {
             val out = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            out.outputFileName = "local-sharing_v${buildDate}.apk"
+            out.outputFileName = "local-sharing_${buildVersion}.apk"
         }
     }
 }
