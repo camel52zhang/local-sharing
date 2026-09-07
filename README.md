@@ -5,7 +5,7 @@
 
 - **中文名**：局域网互传工具
 - **英文名**：local-sharing
-- **当前版本**：桌面端安装包 `v0.1.3` · 安卓端 `v0.1.3`
+- **当前版本**：`v26.09.07`（两端同规则：版本号 = 构建日期的补零形式 `vYY.MM.DD`，随每次构建自动更新，最新版以 [Releases](https://github.com/camel52zhang/local-sharing/releases) 页为准；详见下文「版本号规则」）
 - **形态**：桌面端为 Tauri 打包的独立桌面应用（Windows x64）；移动端为 Android App（Kotlin + Jetpack Compose）
 
 ---
