@@ -5,7 +5,7 @@
 
 - **中文名**：局域网互传工具
 - **英文名**：local-sharing
-- **当前版本**：`v26.09.07`（两端同规则：版本号 = 构建日期的补零形式 `vYY.MM.DD`，随每次构建自动更新，最新版以 [Releases](https://github.com/camel52zhang/local-sharing/releases) 页为准；详见下文「版本号规则」）
+- **当前版本**：`v26.09.28`（两端同规则：版本号 = 构建日期的补零形式 `vYY.MM.DD`，随每次构建自动更新，最新版以 [Releases](https://github.com/camel52zhang/local-sharing/releases) 页为准；详见下文「版本号规则」）
 - **形态**：桌面端为 Tauri 打包的独立桌面应用（Windows x64）；移动端为 Android App（Kotlin + Jetpack Compose）
 
 ---
@@ -20,7 +20,9 @@
 6. **系统分享入口**：手机端已注册为系统分享目标——在相册、文件管理器等任意 App 中「分享」文件时可直接选本应用，连接电脑后自动填入发送列表。
 7. **接收端自定义保存目录**：手机端可指定文件保存位置（SAF 选目录，持久记忆），并支持「自动保存」开关。
 8. **传输活动历史**：电脑端记录收发活动流，便于回看。
-9. **诊断日志（移动端，调试包专属）**：详见下方「🐞 诊断日志」一节。
+9. **设备重命名**：电脑端可对已连接设备设置别名（悬停设备行点 ✏️），下次同一设备再连接自动沿用。
+10. **电视接收模式（实验性）**：App 已注册 Android TV 启动入口（LEANBACK_LAUNCHER），在 TCL / 小米等安卓电视上打开「局域网互传」后，电视端起服务并显示二维码，手机扫码即可把照片/APK/文件直推到电视，APK 可一键调起系统安装器安装。详见下文「📺 电视接收模式」。
+11. **诊断日志（移动端，调试包专属）**：详见下方「🐞 诊断日志」一节。
 
 ---
 
@@ -211,7 +213,26 @@ keytool -genkeypair -v -keystore local-sharing-release.jks \
 
 - `INTERNET`：局域网通信（HTTP，已开启 `usesCleartextTraffic`）。
 - `CAMERA`：扫码连接（运行时申请）。
-- 接收文件写入 App 私有/用户指定目录（SAF），无需存储权限。
+- `REQUEST_INSTALL_PACKAGES`：电视模式下从列表一键安装收到的 APK（仅调起系统安装器）。
+- 接收文件写入 App 私有/用户指定目录（SAF）或公共 Downloads（电视模式，Android 10+ MediaStore），无需存储权限。
+- 电视端注册 Leanback 启动入口，安卓 TV 桌面可直接打开；不支持触屏/遥控器 D-pad 焦点导航以外的特殊操作。
+
+---
+
+## 📺 电视接收模式（实验性）
+
+在安卓电视（TCL / 小米等，Android 5.0+）上安装本 App 后，电视会出现在系统桌面/应用列表（Leanback 启动入口）。打开后：
+
+1. 电视端在前台服务中启动一个与电脑端**同契约**的 HTTP/WebSocket 接收服务，全屏显示连接二维码。
+2. 手机端正常「扫码连接」该电视（无需输入遥控器难敲的 IP）。
+3. 手机选文件/照片发送 → 直接落到电视 `Downloads/local-sharing/`（Android 10+ 走 MediaStore，无需存储权限）。
+4. 推送 `.apk` 文件时，电视端列表会出现「安装」按钮：授权「安装未知应用」后，一键调起系统安装器。
+
+说明：
+
+- 电视模式为**接收专用**：电视充当服务端（角色对调），不支持从电视向外发送。
+- 接口与电脑端一致（`/api/info`、`/api/devices`、`/api/upload`、`/ws`、`/health`），手机端代码零改动即可连电视。
+- 需要电视与手机在同一局域网；部分电视系统对后台服务限制较严，请保持电视端页面在前台。
 
 ---
 
@@ -248,6 +269,9 @@ keytool -genkeypair -v -keystore local-sharing-release.jks \
 | POST | `/api/transfer/out`     | 电脑→手机推送（multipart + `deviceId`）            |
 | GET  | `/api/transfer/:id`     | 手机拉取推送文件                                 |
 | POST | `/api/transfer/:id/ack` | 手机确认接收完成                                 |
+| POST | `/api/devices/:id/rename` | 设备重命名（本地设置，别名持久化到 settings.json）           |
+
+> 电视接收模式的服务端（NanoHTTPD/NanoWSD）实现同一契约的 `/health`、`/api/info`、`/api/devices`、`/api/upload` 与 `/ws`，手机端无需区分电脑或电视。
 
 WebSocket：`/ws?token=<deviceToken>`（设备）或 `/ws?role=pc`（电脑仪表盘实时更新）。
 
@@ -293,7 +317,7 @@ WebSocket：`/ws?token=<deviceToken>`（设备）或 `/ws?role=pc`（电脑仪�
 
 ## 🗺 路线图
 
-**已实现**：双向文件/文件夹传输、扫码直连、共享码、实时进度、电脑端桌面外壳（Tauri 安装包 + 便携版）、移动端系统分享入口、接收端自定义保存目录、传输活动历史、移动端诊断日志。
+**已实现**：双向文件/文件夹传输、扫码直连、共享码、实时进度、电脑端桌面外壳（Tauri 安装包 + 便携版）、移动端系统分享入口、接收端自定义保存目录、传输活动历史、设备重命名（持久别名）、电视接收模式（实验性）、移动端诊断日志。
 
 **待完善**：端到端加密（DTLS / 预共享密钥）、跨平台桌面端（macOS / Linux）、设备间直连优化。
 
