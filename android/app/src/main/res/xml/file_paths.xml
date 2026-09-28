@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 一键安装 APK：把收到的 APK 复制到 cacheDir/installs 后经 FileProvider 共享 -->
+    <cache-path name="installs" path="installs/" />
+</paths>

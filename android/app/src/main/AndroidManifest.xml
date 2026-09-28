@@ -6,6 +6,20 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- 扫码需要相机 -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- 电视接收模式：前台服务保活（API 34 起需声明类型） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 二期：接收到的 APK 一键安装 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- API 28 及以下写公共 Downloads 目录（29+ 走 MediaStore 无需权限） -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- 电视/盒子：本应用不依赖触屏，可在无触屏设备上安装运行 -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
         android:name=".App"
@@ -48,6 +62,36 @@
                 <data android:mimeType="text/*" />
             </intent-filter>
         </activity>
+
+        <!-- 电视接收模式：电视桌面独立入口（LEANBACK），大屏二维码 + 接收列表 -->
+        <activity
+            android:name=".receiver.TvReceiverActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:theme="@style/Theme.LocalSharing">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 接收服务：前台保活，承载内嵌 HTTP/WS 服务器 -->
+        <service
+            android:name=".receiver.ReceiverService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 一键安装 APK：FileProvider 共享缓存文件给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>

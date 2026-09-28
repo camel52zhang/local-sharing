@@ -89,4 +89,9 @@ dependencies {
 
     // 遍历文件夹（SAF tree）
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // 电视接收模式：内嵌 HTTP/WS 服务器 + 大屏二维码生成
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
+    implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
+    implementation("com.google.zxing:core:3.5.3")
 }
