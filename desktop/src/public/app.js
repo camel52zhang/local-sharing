@@ -56,10 +56,31 @@ function renderDevices(devices) {
       <span class="ico">${DEVICE_ICON[d.icon] || DEVICE_ICON.device}</span>
       <span class="name">${esc(d.name)}</span>
       <span class="pill ${d.online ? 'on' : 'off'}">${d.online ? '在线' : '离线'}</span>
+      <button class="rn" data-id="${esc(d.id)}" data-name="${esc(d.name)}" title="重命名设备">✏️</button>
     </li>`).join('');
   sel.innerHTML = '<option value="">— 请选择 —</option>' +
     devices.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
 }
+
+// 设备重命名：写入持久化别名，重连后自动沿用
+$('#deviceList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button.rn');
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const name = prompt('重命名设备（留空恢复默认名）：', btn.dataset.name || '');
+  if (name === null) return; // 取消
+  try {
+    const res = await fetch(`/api/devices/${encodeURIComponent(id)}/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() }),
+    });
+    if (!res.ok) console.error('rename failed:', res.status);
+    // 成功后服务端会通过 WS 推送新的 device-list，无需手动刷新
+  } catch (err) {
+    console.error('rename failed:', err);
+  }
+});
 
 // ---- 设置 ----
 let downloadDir = '';

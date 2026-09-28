@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import archiver from 'archiver';
-import { config, paths, loadHistory, appendHistory, appendHistoryBulk, saveHistory, clearHistory, updateSettings } from '../config';
+import { config, paths, loadSettings, loadHistory, appendHistory, appendHistoryBulk, saveHistory, clearHistory, updateSettings } from '../config';
 import {
   ActivityItem,
   Device,
@@ -120,12 +120,21 @@ function persistAllActivity(): void {
   saveHistory(items);
 }
 
+/** 取设备别名（clientId -> 自定义名，持久化在 settings.json） */
+function getAlias(deviceId: string): string {
+  return loadSettings().deviceAliases[deviceId] || '';
+}
+
 export function registerDevice(name: string, type: DeviceType, clientId?: string): Device {
+  // 展示名 = 别名（若有，重连后自动沿用）|| 设备上报名
+  const alias = clientId ? getAlias(clientId) : '';
+  const displayName = alias || name || 'Unnamed Device';
   // 同一 clientId（同设备）再次注册时复用既有条目，仅刷新 name/token/lastSeen，
   // 不再新建，避免同手机反复连接产生多个 Device。
   if (clientId && devices.has(clientId)) {
     const existing = devices.get(clientId)!;
-    existing.name = name || 'Unnamed Device';
+    existing.reportedName = name || 'Unnamed Device';
+    existing.name = displayName;
     existing.token = token();
     existing.lastSeen = Date.now();
     emitDeviceList();
@@ -133,7 +142,8 @@ export function registerDevice(name: string, type: DeviceType, clientId?: string
   }
   const device: Device = {
     id: clientId && clientId.length > 0 ? clientId : id('dev'),
-    name: name || 'Unnamed Device',
+    name: displayName,
+    reportedName: name || 'Unnamed Device',
     type,
     token: token(),
     lastSeen: Date.now(),
@@ -141,6 +151,27 @@ export function registerDevice(name: string, type: DeviceType, clientId?: string
   devices.set(device.id, device);
   emitDeviceList();
   return device;
+}
+
+/**
+ * 重命名设备：写入持久化别名，重连后自动沿用。
+ * 名称为空或等于设备上报名时视为清除别名（回退上报名）。
+ */
+export function renameDevice(deviceId: string, rawName: string): Device | undefined {
+  const d = devices.get(deviceId);
+  if (!d) return undefined;
+  const name = rawName.trim();
+  const s = loadSettings();
+  if (!name || name === d.reportedName) {
+    delete s.deviceAliases[deviceId];
+    d.name = d.reportedName;
+  } else {
+    s.deviceAliases[deviceId] = name;
+    d.name = name;
+  }
+  updateSettings({ deviceAliases: s.deviceAliases });
+  emitDeviceList();
+  return d;
 }
 
 export function getDevice(deviceId: string): Device | undefined {

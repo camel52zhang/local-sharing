@@ -2,8 +2,8 @@
 !include "LogicLib.nsh"
 
 Name "local-sharing"
-; 外部显示版命名 vYY.MM.DD（补零），与 CI 产物名一致；exe 内部是同日 semver（26.9.7 式），恒等映射
-; 例：makensis /DBUILD_DATE=26.09.07 build-installer.nsi
+; Display version = vYY.MM.DD (zero-padded, same rule as CI artifacts);
+; the exe embeds same-day semver (e.g. 26.9.7). Usage: makensis /DBUILD_DATE=26.09.07 build-installer.nsi
 !ifndef BUILD_DATE
   !define BUILD_DATE "26.09.07"
 !endif

@@ -67,6 +67,12 @@ body {
 .pill.on  { background: var(--success-soft); color: var(--success); }
 .pill.off { background: var(--surface-2);  color: var(--muted); }
 .pill.warn{ background: var(--warning-soft); color: var(--warning); }
+/* 设备重命名按钮：默认隐藏，悬停该行时出现 */
+.rn { border: 0; background: transparent; cursor: pointer; font-size: 14px;
+      line-height: 1; padding: 4px; border-radius: var(--r-md); opacity: 0;
+      transition: opacity .15s; margin-left: auto; }
+.item:hover .rn { opacity: .7; }
+.rn:hover { opacity: 1 !important; background: var(--surface-2); }
 .pill.folder { background: var(--warning-soft); color: var(--warning); }
 .pill.fail { background: var(--danger-soft); color: var(--danger); }
 

@@ -61,6 +61,8 @@ export interface Settings {
   downloadDir: string;
   /** 上次发送成功的目标设备 id；用于拖拽即发时记忆上次设备 */
   lastDeviceId: string;
+  /** 设备别名表：clientId -> 自定义名；重连后自动应用（键为设备上报的 clientId） */
+  deviceAliases: Record<string, string>;
 }
 
 export const settingsPath = path.join(config.dataDir, 'settings.json');
@@ -72,12 +74,20 @@ export function loadSettings(): Settings {
       return {
         downloadDir: typeof parsed.downloadDir === 'string' ? parsed.downloadDir : '',
         lastDeviceId: typeof parsed.lastDeviceId === 'string' ? parsed.lastDeviceId : '',
+        deviceAliases:
+          parsed.deviceAliases && typeof parsed.deviceAliases === 'object'
+            ? Object.fromEntries(
+                Object.entries(parsed.deviceAliases as Record<string, unknown>).filter(
+                  ([k, v]) => typeof k === 'string' && k.length > 0 && typeof v === 'string',
+                ) as [string, string][],
+              )
+            : {},
       };
     }
   } catch {
     // ignore corrupt settings
   }
-  return { downloadDir: '', lastDeviceId: '' };
+  return { downloadDir: '', lastDeviceId: '', deviceAliases: {} };
 }
 
 export function saveSettings(s: Settings): void {
@@ -88,6 +98,7 @@ export function updateSettings(patch: Partial<Settings>): Settings {
   const s = loadSettings();
   if (patch.downloadDir !== undefined) s.downloadDir = patch.downloadDir;
   if (patch.lastDeviceId !== undefined) s.lastDeviceId = patch.lastDeviceId;
+  if (patch.deviceAliases !== undefined) s.deviceAliases = patch.deviceAliases;
   saveSettings(s);
   return s;
 }

@@ -13,6 +13,7 @@ import {
   getDevice,
   authenticate,
   listDevices,
+  renameDevice,
   deviceIcon,
   listReceived,
   listActivity,
@@ -207,6 +208,13 @@ export function buildApp(): express.Express {
         icon: deviceIcon(d.type),
       })),
     });
+  });
+
+  // ---- 设备重命名（持久化别名，重连后自动沿用；空名=清除别名） ----
+  app.post('/api/devices/:id/rename', localOnly, (req, res) => {
+    const device = renameDevice(req.params.id, String(req.body?.name ?? ''));
+    if (!device) return res.status(404).json({ error: 'not_found' });
+    res.json({ ok: true, name: device.name });
   });
 
   // ---- 接收文件列表 ----

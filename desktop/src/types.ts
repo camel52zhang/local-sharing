@@ -2,7 +2,10 @@ export type DeviceType = 'phone' | 'tablet' | 'pc' | 'unknown';
 
 export interface Device {
   id: string;
+  /** 展示名（=设备别名，无别名时等于上报名） */
   name: string;
+  /** 设备自己上报的原始名（清除别名后回退用） */
+  reportedName: string;
   type: DeviceType;
   token: string;
   lastSeen: number;
