@@ -53,6 +53,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 电视设备兜底：无论用户从哪个入口打开（安装器"打开"按钮/第三方桌面/文件管理器
+        // 都会落到默认 LAUNCHER 即本 Activity），只要是电视环境就重定向到电视接收模式。
+        // 电视桌面(LEANBACK_LAUNCHER)本应直达 TvReceiverActivity，但部分 TCL/小米/第三方
+        // 电视桌面会解析到默认启动项，导致用户看到手机版"扫码连接"界面——电视没有相机
+        // 也没有触屏，该界面完全不可用，故此处必须兜底。
+        if (isTvDevice()) {
+            startActivity(Intent(this, com.localsharing.app.receiver.TvReceiverActivity::class.java))
+            finish()
+            return
+        }
         enableEdgeToEdge()
         setContent {
             LocalSharingTheme {
@@ -93,6 +103,19 @@ class MainActivity : ComponentActivity() {
     private fun handleSend(intent: Intent?) {
         if (intent?.action in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)) {
             vm.handleIncomingShare(intent)
+        }
+    }
+
+    /** 判定当前是否电视/盒子设备：leanback 特征、television 特征或系统 UI 模式为电视任一命中 */
+    private fun isTvDevice(): Boolean {
+        val pm = packageManager
+        if (pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)) return true
+        if (pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)) return true
+        return try {
+            val umm = getSystemService(android.app.UiModeManager::class.java)
+            umm?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        } catch (e: Exception) {
+            false
         }
     }
 }
