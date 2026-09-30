@@ -79,7 +79,12 @@ class ReceiverService : Service() {
                     onReceived = { /* 记录已由 Store 落盘，Activity 通过轮询/重启观察 */ },
                     onLog = { line -> appendLog(line) },
                 )
-                s.start(fi.iki.elonen.NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+                // 关键：timeout 传 0 = 不设 SO_TIMEOUT。
+                // NanoHTTPD 仅在 timeout>0 时 setSoTimeout；NanoWSD 2.3.1 握手后不会重置该超时，
+                // 若沿用 SOCKET_READ_TIMEOUT(5000ms)，空闲 WebSocket 会在 5s 后被
+                // SocketTimeoutException 打断 → 手机端报 "websocket error" 并反复重连。
+                // （桌面端 Node 服务无此超时，所以同一部手机连电脑正常。）
+                s.start(0, false)
                 started = s
                 usedPort = p
                 break

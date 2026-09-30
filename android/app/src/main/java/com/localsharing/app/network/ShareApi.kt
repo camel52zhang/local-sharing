@@ -27,6 +27,9 @@ object ShareApi {
         .connectTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(0, TimeUnit.SECONDS) // 大文件上传不限时
         .readTimeout(60, TimeUnit.SECONDS)
+        // WebSocket 主动心跳：避免长时间空闲被中间设备（路由器/NAT/电视系统）回收连接；
+        // 服务端（桌面 Node / 电视 NanoWSD）收到 Ping 均会自动回 Pong。
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     suspend fun getInfo(baseUrl: String): PcInfo = withContext(Dispatchers.IO) {

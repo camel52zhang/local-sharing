@@ -36,22 +36,85 @@ class ReceiverServer(
     /** 防重复提交的简单互斥 */
     private val saveLock = Any()
 
+    /** 当前存活的长连接（用于服务端保活 ping；NanoWSD 2.3.1 无自动心跳） */
+    private val liveSockets = java.util.concurrent.CopyOnWriteArrayList<WebSocket>()
+    private var pinger: Thread? = null
+
     // ------------------------------------------------------------------
 
     override fun openWebSocket(handshake: IHTTPSession): WebSocket {
+        // 手机端以 /ws?token=xxx 建连，token 反查 clientId 以标记在线设备
+        val token = handshake.parameters["token"]?.firstOrNull() ?: ""
+        val clientId = ReceiverStore.clientIdForToken(context, token)
         return object : WebSocket(handshake) {
-            override fun onOpen() { onLog("[ws] phone connected") }
+            override fun onOpen() {
+                liveSockets.add(this)
+                ensurePinger()
+                clientId?.let { DevicePresence.setOnline(it, true) }
+                onLog("[ws] phone connected (${clientId?.take(8) ?: "unknown"})")
+            }
+
             override fun onClose(
                 code: CloseCode?,
                 reason: String?,
                 initiatedByRemote: Boolean,
-            ) { onLog("[ws] phone closed: $code") }
+            ) {
+                liveSockets.remove(this)
+                clientId?.let { DevicePresence.setOnline(it, false) }
+                onLog("[ws] phone closed: $code")
+            }
+
             override fun onMessage(message: NanoWSD.WebSocketFrame) { /* 忽略手机端消息 */ }
             override fun onPong(pong: NanoWSD.WebSocketFrame?) {}
             override fun onException(exception: IOException?) {
                 onLog("[ws] error: ${exception?.message}")
             }
         }
+    }
+
+    /**
+     * 保活 ping：NanoWSD 2.3.1 源码中没有任何自动心跳（仅提供手动 ping 帧 API），
+     * 若不主动 ping，长时间空闲的连接会被中间设备/系统回收；同时 ping 写失败可及时
+     * 发现半开连接并清理。每 20s 一轮。
+     */
+    private fun ensurePinger() {
+        if (pinger != null) return
+        pinger = Thread {
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    Thread.sleep(20_000)
+                } catch (e: InterruptedException) {
+                    return@Thread
+                }
+                val dead = mutableListOf<WebSocket>()
+                liveSockets.forEach { ws ->
+                    try {
+                        if (ws.isOpen) ws.ping("k".toByteArray()) else dead += ws
+                    } catch (e: Exception) {
+                        dead += ws
+                    }
+                }
+                dead.forEach { ws ->
+                    liveSockets.remove(ws)
+                    try {
+                        ws.close(WebSocketFrame.CloseCode.NormalClosure, "ping failed", false)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }.apply {
+            isDaemon = true
+            name = "ls-ws-ping"
+            start()
+        }
+    }
+
+    override fun stop() {
+        pinger?.interrupt()
+        pinger = null
+        liveSockets.clear()
+        DevicePresence.clear()
+        super.stop()
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -90,6 +153,8 @@ class ReceiverServer(
         val name = form["name"] ?: "Device"
         val clientId = form["clientId"] ?: ""
         val token = ReceiverStore.tokenFor(context, clientId)
+        // 登记设备名，供电视端「已连接设备」列表展示
+        ReceiverStore.upsertDevice(context, clientId, name)
         val obj = JSONObject()
             .put("deviceId", if (clientId.isEmpty()) "tv-dev-${System.currentTimeMillis()}" else clientId)
             .put("token", token)
@@ -163,9 +228,17 @@ class ReceiverServer(
         } else safeName
 
         if (android.os.Build.VERSION.SDK_INT >= 29) {
+            // 尊重电视端「保存位置」设置：Download/local-sharing[/子目录]
+            val sub = ReceiverStore.getSaveSubdir(context)
+            val relative = if (sub.isEmpty()) {
+                "Download/${ReceiverStore.SAVE_ROOT}"
+            } else {
+                "Download/${ReceiverStore.SAVE_ROOT}/$sub"
+            }
             val values = android.content.ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, finalName)
                 put(MediaStore.Downloads.MIME_TYPE, guessMime(finalName))
+                put(MediaStore.Downloads.RELATIVE_PATH, relative)
             }
             val uri = context.contentResolver.insert(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
@@ -176,10 +249,11 @@ class ReceiverServer(
             return finalName to tmp.length()
         }
         // API 28-：直接写公共 Downloads 目录（已有 WRITE_EXTERNAL_STORAGE 权限）
+        val sub = ReceiverStore.getSaveSubdir(context)
         val dir = File(
             android.os.Environment
                 .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-            "local-sharing",
+            if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
         )
         dir.mkdirs()
         var f = File(dir, finalName)

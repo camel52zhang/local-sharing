@@ -23,10 +23,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,8 +58,10 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 电视接收模式主界面：大屏二维码（手机扫码连入）+ 接收文件列表 + APK 一键安装。
- * 为遥控器/D-pad 优化：仅「停止接收」「安装」两类可聚焦元素。
+ * 电视接收模式主界面：与电脑端仪表盘同构的信息结构——
+ * 左：二维码 + 连接地址 + 保存位置 + 操作按钮；
+ * 右：已连接设备（含在线状态）+ 接收记录（含来源设备，APK 可一键安装）。
+ * 为遥控器/D-pad 优化：可聚焦元素仅按钮类。
  */
 class TvReceiverActivity : ComponentActivity() {
 
@@ -87,16 +92,19 @@ class TvReceiverActivity : ComponentActivity() {
 private fun ReceiverScreen(onStop: () -> Unit) {
     val context = LocalContext.current
     val status by ReceiverService.status.collectAsState()
-    var received by remember { mutableStateOf(ReceiverStore.loadReceived(context)) }
+    val online by DevicePresence.online.collectAsState()
 
-    // 周期刷新接收列表（新文件由服务落盘并持久化记录）
-    LaunchedEffect(status.log) {
-        received = ReceiverStore.loadReceived(context)
-    }
+    var received by remember { mutableStateOf(ReceiverStore.loadReceived(context)) }
+    var devices by remember { mutableStateOf(ReceiverStore.loadDevices(context)) }
+    var savePath by remember { mutableStateOf(ReceiverStore.savePathLabel(context)) }
+    var showSettings by remember { mutableStateOf(false) }
+
+    // 周期刷新接收列表与设备列表（新文件/新设备由服务落盘并持久化记录）
     LaunchedEffect(Unit) {
         while (true) {
             delay(2000)
             received = ReceiverStore.loadReceived(context)
+            devices = ReceiverStore.loadDevices(context)
         }
     }
 
@@ -105,40 +113,71 @@ private fun ReceiverScreen(onStop: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF101418))
-                .padding(32.dp),
+                .padding(28.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 左侧：二维码 + 地址
+            // ---------- 左：二维码 + 保存位置 + 操作 ----------
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.width(360.dp),
             ) {
-                Text("手机扫码，直传电视", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(20.dp))
+                Text("手机扫码，直传电视", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(16.dp))
                 val url = if (status.running) "http://${status.lanIp}:${status.port}" else ""
                 if (url.isNotEmpty()) {
-                    QrImage(url, 300.dp)
-                    Spacer(Modifier.height(16.dp))
-                    Text(url, color = Color(0xFF9AE6B4), fontSize = 22.sp)
+                    QrImage(url, 270.dp)
+                    Spacer(Modifier.height(12.dp))
+                    Text(url, color = Color(0xFF9AE6B4), fontSize = 20.sp)
                 } else {
                     Text("服务启动中…", color = Color(0xFFFFB74D), fontSize = 20.sp)
                 }
-                Spacer(Modifier.height(24.dp))
-                OutlinedButton(onClick = {
-                    ReceiverService.stop(context)
-                    onStop()
-                }) { Text("停止接收", color = Color.White) }
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    "保存位置：$savePath",
+                    color = Color(0xFF8899A6),
+                    fontSize = 13.sp,
+                    maxLines = 2,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row {
+                    Button(onClick = { showSettings = true }) { Text("保存位置") }
+                    Spacer(Modifier.width(12.dp))
+                    OutlinedButton(onClick = {
+                        ReceiverService.stop(context)
+                        onStop()
+                    }) { Text("停止接收", color = Color.White) }
+                }
             }
 
-            Spacer(Modifier.width(40.dp))
+            Spacer(Modifier.width(28.dp))
 
-            // 右侧：接收文件列表
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Text("已接收文件", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(12.dp))
-                LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // ---------- 右：已连接设备 + 接收记录 ----------
+            Column(modifier = Modifier.fillMaxSize()) {
+                Text("已连接设备", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                DeviceList(devices, online)
+                Spacer(Modifier.height(16.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("接收记录", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(12.dp))
+                    Text("共 ${received.size} 项", color = Color(0xFF8899A6), fontSize = 13.sp)
+                    Spacer(Modifier.width(16.dp))
+                    if (received.isNotEmpty()) {
+                        OutlinedButton(onClick = {
+                            ReceiverStore.clearReceived(context)
+                            received = emptyList()
+                        }) { Text("清空记录", color = Color.White) }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     items(received, key = { it.id }) { item ->
-                        ReceivedRow(item)
+                        ReceivedRow(item, fromName = ReceiverStore.displayName(context, item.fromDevice))
                     }
                     if (received.isEmpty()) {
                         item {
@@ -148,11 +187,91 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                 }
             }
         }
+
+        if (showSettings) {
+            SaveLocationDialog(
+                initial = ReceiverStore.getSaveSubdir(context),
+                onDismiss = { showSettings = false },
+                onConfirm = { sub ->
+                    ReceiverStore.setSaveSubdir(context, sub)
+                    savePath = ReceiverStore.savePathLabel(context)
+                    showSettings = false
+                },
+            )
+        }
     }
 }
 
 @Composable
-private fun ReceivedRow(item: ReceivedItem) {
+private fun DeviceList(devices: List<ReceiverDevice>, online: Set<String>) {
+    if (devices.isEmpty()) {
+        Text("暂无设备连接", color = Color(0xFF8899A6), fontSize = 15.sp)
+        return
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        devices.takeLast(6).reversed().forEach { d ->
+            val isOnline = d.clientId in online
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (isOnline) "●" else "○",
+                    color = if (isOnline) Color(0xFF68D391) else Color(0xFF5A6672),
+                    fontSize = 14.sp,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    d.name,
+                    color = if (isOnline) Color.White else Color(0xFF8899A6),
+                    fontSize = 16.sp,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (isOnline) "在线" else "离线",
+                    color = if (isOnline) Color(0xFF68D391) else Color(0xFF5A6672),
+                    fontSize = 12.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SaveLocationDialog(
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("保存位置") },
+        text = {
+            Column {
+                Text(
+                    "文件保存在「下载/local-sharing」下。可填写子目录名（留空则直接用根目录）。",
+                    fontSize = 13.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    label = { Text("子目录，如 电影 / tv") },
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "最终位置：下载/local-sharing/" + text.trim().trim('/'),
+                    color = Color(0xFF5A6672),
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("确定") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun ReceivedRow(item: ReceivedItem, fromName: String) {
     val context = LocalContext.current
     Row(
         modifier = Modifier
@@ -164,7 +283,7 @@ private fun ReceivedRow(item: ReceivedItem) {
         Column(modifier = Modifier.weight(1f)) {
             Text(item.name, color = Color.White, fontSize = 16.sp, maxLines = 1)
             Text(
-                "${formatSize(item.size)} · " +
+                "来自 $fromName · ${formatSize(item.size)} · " +
                     SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(item.time)),
                 color = Color(0xFF8899A6),
                 fontSize = 12.sp,
@@ -237,7 +356,7 @@ private fun installApk(context: android.content.Context, item: ReceivedItem) {
     }
 }
 
-/** 按显示名从公共 Downloads/local-sharing/ 读取文件内容到 target；找不到返回 false */
+/** 按显示名从公共 Downloads（含子目录）读取文件内容到 target；找不到返回 false */
 private fun copyFromDownloads(
     context: android.content.Context,
     displayName: String,
@@ -263,9 +382,10 @@ private fun copyFromDownloads(
         }
         return false
     }
+    val sub = ReceiverStore.getSaveSubdir(context)
     val dir = File(
         android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-        "local-sharing",
+        if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
     )
     val source = File(dir, displayName)
     if (!source.exists()) return false
