@@ -64,6 +64,17 @@ object ReceiverStore {
     private const val KEY_SUBDIR = "save_subdir"
     private const val RECEIVED_FILE = "received.json"
 
+    /** 接收记录上限：避免 JSON 无限增长导致电视端读取/渲染变慢 */
+    private const val MAX_RECORDS = 200
+
+    /** 数据版本号：任何写操作自增，UI 订阅它做事件驱动的刷新（替代 2s 轮询） */
+    private val _revision = MutableStateFlow(0)
+    val revision: StateFlow<Int> = _revision.asStateFlow()
+
+    private fun bumpRevision() {
+        _revision.value += 1
+    }
+
     /** 保存根目录名（公共 Downloads 下） */
     const val SAVE_ROOT = "local-sharing"
 
@@ -142,6 +153,7 @@ object ReceiverStore {
         }
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
             .edit().putString(KEY_DEVICES, arr.toString()).apply()
+        bumpRevision()
     }
 
     /** 用 clientId / 名称片段解析显示名 */
@@ -209,9 +221,16 @@ object ReceiverStore {
         )
     }
 
+    /** 删除单条记录（仅移除记录，不删除已落盘文件） */
+    fun deleteReceived(context: Context, id: String) {
+        saveReceived(context, loadReceived(context).filterNot { it.id == id })
+    }
+
     private fun saveReceived(context: Context, list: List<ReceivedItem>) {
+        // 容量上限：只保留最近 MAX_RECORDS 条，避免文件与渲染无限增长
+        val capped = list.take(MAX_RECORDS)
         val arr = JSONArray()
-        list.forEach { r ->
+        capped.forEach { r ->
             arr.put(
                 JSONObject()
                     .put("id", r.id)
@@ -224,5 +243,6 @@ object ReceiverStore {
             )
         }
         File(context.filesDir, RECEIVED_FILE).writeText(arr.toString())
+        bumpRevision()
     }
 }

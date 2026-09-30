@@ -114,21 +114,38 @@ class ReceiverService : Service() {
         _status.value = _status.value.copy(log = (_status.value.log + entry).takeLast(100))
     }
 
+    /**
+     * 选择用于展示二维码的局域网 IP。
+     * 电视常有多块网卡（有线 eth0 + 无线 wlan0）以及系统虚拟网卡（p2p0 / dummy / tun / rmnet），
+     * 简单取「第一个非回环 IPv4」可能拿到虚拟网卡地址，导致手机扫码后连不上。
+     * 策略：跳过虚拟/点对点接口，按 wlan > eth > 其它 的优先级取地址。
+     */
     private fun lanIp(): String {
         return try {
+            val candidates = mutableListOf<Pair<Int, String>>()
             val en = java.net.NetworkInterface.getNetworkInterfaces()
-            var ip = ""
             while (en.hasMoreElements()) {
                 val n = en.nextElement()
+                if (!n.isUp || n.isLoopback) continue
+                val name = (n.name ?: "").lowercase(java.util.Locale.US)
+                if (name.startsWith("p2p") || name.startsWith("tun") || name.startsWith("rmnet") ||
+                    name.startsWith("ppp") || name.contains("dummy")
+                ) continue
+                val priority = when {
+                    name.startsWith("wlan") -> 0
+                    name.startsWith("eth") -> 1
+                    else -> 2
+                }
                 val addrs = n.inetAddresses
                 while (addrs.hasMoreElements()) {
                     val a = addrs.nextElement()
                     if (!a.isLoopbackAddress && a is java.net.Inet4Address) {
-                        return a.hostAddress ?: ""
+                        val host = a.hostAddress ?: continue
+                        candidates += priority to host
                     }
                 }
             }
-            ip
+            candidates.minByOrNull { it.first }?.second ?: ""
         } catch (e: Exception) {
             ""
         }

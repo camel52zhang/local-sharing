@@ -246,7 +246,16 @@ class ReceiverServer(
             context.contentResolver.openOutputStream(uri)?.use { out ->
                 FileInputStream(tmp).use { it.copyTo(out) }
             }
-            return finalName to tmp.length()
+            // MediaStore 遇到同名文件会自动改名（如 photo.jpg -> photo (1).jpg）。
+            // 必须回读真实落盘名并记录，否则「打开/安装」按 DISPLAY_NAME 反查会命中旧文件。
+            val actualName = try {
+                context.contentResolver.query(
+                    uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null,
+                )?.use { c -> if (c.moveToFirst()) c.getString(0) else finalName } ?: finalName
+            } catch (e: Exception) {
+                finalName
+            }
+            return actualName to tmp.length()
         }
         // API 28-：直接写公共 Downloads 目录（已有 WRITE_EXTERNAL_STORAGE 权限）
         val sub = ReceiverStore.getSaveSubdir(context)

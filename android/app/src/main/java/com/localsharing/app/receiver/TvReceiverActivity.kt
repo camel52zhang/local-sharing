@@ -7,6 +7,7 @@ import android.provider.MediaStore
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -51,7 +52,8 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.localsharing.app.ui.theme.LocalSharingTheme
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -67,6 +69,9 @@ class TvReceiverActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 电视接收期间保持屏幕常亮：否则系统息屏后前台服务可能被回收，
+        // 且扫码界面本身需要长时间可见。
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         // API 33+ 前台服务通知需要通知权限（拒绝也不影响接收，仅通知不显示）
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
@@ -98,14 +103,23 @@ private fun ReceiverScreen(onStop: () -> Unit) {
     var devices by remember { mutableStateOf(ReceiverStore.loadDevices(context)) }
     var savePath by remember { mutableStateOf(ReceiverStore.savePathLabel(context)) }
     var showSettings by remember { mutableStateOf(false) }
+    var lastSeenId by remember { mutableStateOf<String?>(null) }
 
-    // 周期刷新接收列表与设备列表（新文件/新设备由服务落盘并持久化记录）
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(2000)
-            received = ReceiverStore.loadReceived(context)
-            devices = ReceiverStore.loadDevices(context)
+    // 事件驱动刷新：服务端每次写入（新文件/新设备）都会自增 revision，UI 订阅它按需重载；
+    // 读盘放在 IO 线程，避免在电视这种弱 CPU 上每 2 秒阻塞主线程。
+    val revision by ReceiverStore.revision.collectAsState()
+    LaunchedEffect(revision) {
+        val (r, d) = withContext(Dispatchers.IO) {
+            ReceiverStore.loadReceived(context) to ReceiverStore.loadDevices(context)
         }
+        val newest = r.firstOrNull()
+        // 仅在上次已有基线且首条变化时提示，避免首屏误报
+        if (newest != null && lastSeenId != null && newest.id != lastSeenId) {
+            Toast.makeText(context, "已接收：${newest.name}", Toast.LENGTH_SHORT).show()
+        }
+        lastSeenId = newest?.id
+        received = r
+        devices = d
     }
 
     MaterialTheme {
@@ -177,7 +191,18 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(received, key = { it.id }) { item ->
-                        ReceivedRow(item, fromName = ReceiverStore.displayName(context, item.fromDevice))
+                        ReceivedRow(
+                            item = item,
+                            fromName = ReceiverStore.displayName(context, item.fromDevice),
+                            onOpen = {
+                                if (item.isApk) installApk(context, item)
+                                else openReceived(context, item)
+                            },
+                            onDelete = {
+                                ReceiverStore.deleteReceived(context, item.id)
+                                received = ReceiverStore.loadReceived(context)
+                            },
+                        )
                     }
                     if (received.isEmpty()) {
                         item {
@@ -271,8 +296,12 @@ private fun SaveLocationDialog(
 }
 
 @Composable
-private fun ReceivedRow(item: ReceivedItem, fromName: String) {
-    val context = LocalContext.current
+private fun ReceivedRow(
+    item: ReceivedItem,
+    fromName: String,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -289,10 +318,14 @@ private fun ReceivedRow(item: ReceivedItem, fromName: String) {
                 fontSize = 12.sp,
             )
         }
+        Spacer(Modifier.width(12.dp))
         if (item.isApk) {
-            Spacer(Modifier.width(12.dp))
-            Button(onClick = { installApk(context, item) }) { Text("安装") }
+            Button(onClick = onOpen) { Text("安装") }
+        } else {
+            OutlinedButton(onClick = onOpen) { Text("打开", color = Color.White) }
         }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(onClick = onDelete) { Text("删除", color = Color(0xFF8899A6)) }
     }
 }
 
@@ -304,10 +337,18 @@ private fun QrImage(content: String, size: Dp) {
             content, BarcodeFormat.QR_CODE, side, side,
             mapOf(EncodeHintType.MARGIN to 1),
         )
-        val bmp = android.graphics.Bitmap.createBitmap(side, side, android.graphics.Bitmap.Config.RGB_565)
-        for (x in 0 until side) for (y in 0 until side) {
-            bmp.setPixel(x, y, if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+        // 批量写入像素（setPixels）比逐像素 setPixel 快一个数量级，
+        // 电视端 CPU 较弱，避免首屏二维码渲染卡顿。
+        val pixels = IntArray(side * side)
+        for (y in 0 until side) {
+            val row = y * side
+            for (x in 0 until side) {
+                pixels[row + x] =
+                    if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+            }
         }
+        val bmp = android.graphics.Bitmap.createBitmap(side, side, android.graphics.Bitmap.Config.RGB_565)
+        bmp.setPixels(pixels, 0, side, 0, 0, side, side)
         bmp.asImageBitmap()
     }
     Image(bitmap = bitmap, contentDescription = "连接二维码", modifier = Modifier.size(size))
@@ -356,8 +397,87 @@ private fun installApk(context: android.content.Context, item: ReceivedItem) {
     }
 }
 
-/** 按显示名从公共 Downloads（含子目录）读取文件内容到 target；找不到返回 false */
-private fun copyFromDownloads(
+/**
+ * 用系统播放器/查看器打开已接收的文件（图片、视频、音频、PDF 等）。
+ * API 29+ 走 MediaStore 内容 URI；API 28- 经 FileProvider 共享公共 Downloads 下的文件。
+ */
+private fun openReceived(context: android.content.Context, item: ReceivedItem) {
+    try {
+        val mime = guessMime(item.name)
+        if (Build.VERSION.SDK_INT >= 29) {
+            val uri = findDownloadsUri(context, item.name) ?: run {
+                Toast.makeText(context, "文件已不在下载目录", Toast.LENGTH_SHORT).show()
+                return
+            }
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        } else {
+            val sub = ReceiverStore.getSaveSubdir(context)
+            val dir = File(
+                android.os.Environment
+                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
+            )
+            val f = File(dir, item.name)
+            if (!f.exists()) {
+                Toast.makeText(context, "文件已不在下载目录", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mime)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+            )
+        }
+    } catch (e: Exception) {
+        Toast.makeText(context, "无法打开：${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** 按显示名在公共 Downloads 中查 content URI */
+private fun findDownloadsUri(context: android.content.Context, displayName: String): Uri? {
+    context.contentResolver.query(
+        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+        arrayOf(MediaStore.MediaColumns._ID),
+        "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+        arrayOf(displayName),
+        null,
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            return Uri.withAppendedPath(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI, cursor.getLong(0).toString(),
+            )
+        }
+    }
+    return null
+}
+
+private fun guessMime(name: String): String {
+    val ext = name.substringAfterLast('.', "").lowercase(Locale.US)
+    return when (ext) {
+        "apk" -> "application/vnd.android.package-archive"
+        "zip" -> "application/zip"
+        "jpg", "jpeg" -> "image/jpeg"
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "mp4" -> "video/mp4"
+        "mkv" -> "video/x-matroska"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "pdf" -> "application/pdf"
+        "txt" -> "text/plain"
+        else -> "*/*"
+    }
+}
+
+/** 按显示名从公共 Downloads（含子目录）读取文件内容到 target；找不到返回 false */private fun copyFromDownloads(
     context: android.content.Context,
     displayName: String,
     target: File,

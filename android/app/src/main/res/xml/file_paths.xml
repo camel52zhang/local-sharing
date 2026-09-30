@@ -2,4 +2,6 @@
 <paths>
     <!-- 一键安装 APK：把收到的 APK 复制到 cacheDir/installs 后经 FileProvider 共享 -->
     <cache-path name="installs" path="installs/" />
+    <!-- API 28- 打开已接收文件：直接共享公共 Downloads/local-sharing 下的文件（含子目录） -->
+    <external-path name="lsdownloads" path="Download/local-sharing/" />
 </paths>
