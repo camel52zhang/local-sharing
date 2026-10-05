@@ -148,10 +148,14 @@ class ReceiverServer(
     }
 
     private fun serveRegister(session: IHTTPSession): Response {
-        val form = mutableMapOf<String, String>()
-        session.parseBody(form)
-        val name = form["name"] ?: "Device"
-        val clientId = form["clientId"] ?: ""
+        session.parseBody(mutableMapOf())
+        // NanoHTTPD 2.3.1 语义（源码实证）：parseBody(map) 传入的 map 只会被 multipart 填充；
+        // application/x-www-form-urlencoded 的字段一律 decodeParms 进 session.parameters。
+        // 因此手机端 register（FormBody: name/type/clientId）必须从 session.parameters 读，
+        // 否则 clientId 为空 → 设备不登记 + token 不固定 → 上传 401 + WS 无法标记在线。
+        fun form(key: String): String = session.parameters[key]?.firstOrNull().orEmpty()
+        val name = form("name").ifBlank { "Device" }
+        val clientId = form("clientId")
         val token = ReceiverStore.tokenFor(context, clientId)
         // 登记设备名，供电视端「已连接设备」列表展示
         ReceiverStore.upsertDevice(context, clientId, name)
@@ -159,7 +163,7 @@ class ReceiverServer(
             .put("deviceId", if (clientId.isEmpty()) "tv-dev-${System.currentTimeMillis()}" else clientId)
             .put("token", token)
             .put("wsUrl", "") // 手机端会回退为 ws://host:port/ws?token=xxx，由本服务器 /ws 承接
-        onLog("[register] $name (clientId=${clientId.take(8)}...)")
+        onLog("[register] $name clientId=${clientId.ifEmpty { "(空)" }.take(12)}")
         return json(Response.Status.OK, obj.toString())
     }
 

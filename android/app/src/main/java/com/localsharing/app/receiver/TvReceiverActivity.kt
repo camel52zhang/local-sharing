@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -103,6 +104,7 @@ private fun ReceiverScreen(onStop: () -> Unit) {
     var devices by remember { mutableStateOf(ReceiverStore.loadDevices(context)) }
     var savePath by remember { mutableStateOf(ReceiverStore.savePathLabel(context)) }
     var showSettings by remember { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(false) }
     var lastSeenId by remember { mutableStateOf<String?>(null) }
 
     // 事件驱动刷新：服务端每次写入（新文件/新设备）都会自增 revision，UI 订阅它按需重载；
@@ -155,6 +157,8 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                 Spacer(Modifier.height(14.dp))
                 Row {
                     Button(onClick = { showSettings = true }) { Text("保存位置") }
+                    Spacer(Modifier.width(12.dp))
+                    OutlinedButton(onClick = { showLogs = true }) { Text("日志", color = Color.White) }
                     Spacer(Modifier.width(12.dp))
                     OutlinedButton(onClick = {
                         ReceiverService.stop(context)
@@ -222,6 +226,26 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     savePath = ReceiverStore.savePathLabel(context)
                     showSettings = false
                 },
+            )
+        }
+
+        // 服务端运行日志：电视上没有 logcat 可看，排障时可直接截图反馈
+        if (showLogs) {
+            AlertDialog(
+                onDismissRequest = { showLogs = false },
+                title = { Text("服务日志（最近 ${status.log.size} 条）") },
+                text = {
+                    if (status.log.isEmpty()) {
+                        Text("暂无日志", fontSize = 13.sp)
+                    } else {
+                        LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                            items(status.log.reversed()) { line ->
+                                Text(line, color = Color(0xCBD5E0), fontSize = 12.sp)
+                            }
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { showLogs = false }) { Text("关闭") } },
             )
         }
     }
