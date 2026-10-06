@@ -69,6 +69,12 @@ object ShareApi {
     }
 
     /**
+     * 上传结果：成功与否 + 失败原因（HTTP 状态码 / 响应体 / 异常信息）。
+     * 失败原因会透传到手机 UI，避免只显示「发送失败，请检查连接」而无法定位。
+     */
+    data class UploadResult(val ok: Boolean, val detail: String = "")
+
+    /**
      * 手机 → 电脑：上传一个或多个文件。
      * asFolder=true 时服务器会将其标记为“文件夹”（通常是客户端已打包的 zip）。
      */
@@ -80,8 +86,8 @@ object ShareApi {
         items: List<OutgoingItem>,
         asFolder: Boolean,
         onProgress: (sent: Long, total: Long) -> Unit,
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (items.isEmpty()) return@withContext false
+    ): UploadResult = withContext(Dispatchers.IO) {
+        if (items.isEmpty()) return@withContext UploadResult(false, "没有选中文件")
         val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
         for (item in items) {
             val size = if (item.size > 0) item.size else getSize(context, item.uri)
@@ -96,11 +102,17 @@ object ShareApi {
             .post(builder.build())
             .build()
         return@withContext try {
-            val resp = client.newCall(req).execute()
-            resp.body?.string()
-            resp.isSuccessful
+            client.newCall(req).execute().use { resp ->
+                val bodyText = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
+                if (resp.isSuccessful) {
+                    UploadResult(true)
+                } else {
+                    // 服务端返回 4xx/5xx 时把状态码与响应体带回去，是定位问题的第一手证据
+                    UploadResult(false, "HTTP ${resp.code} ${bodyText.take(200)}".trim())
+                }
+            }
         } catch (e: Exception) {
-            false
+            UploadResult(false, "${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

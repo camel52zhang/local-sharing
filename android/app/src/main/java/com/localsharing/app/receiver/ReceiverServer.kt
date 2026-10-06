@@ -33,6 +33,42 @@ class ReceiverServer(
     private val onLog: (String) -> Unit,
 ) : NanoWSD(port) {
 
+    init {
+        // NanoHTTPD 默认的 DefaultTempFileManager 依赖 System.getProperty("java.io.tmpdir")，
+        // 部分电视 ROM 上该目录不可写，File.createTempFile 会抛 IOException ->
+        // 被 getTmpBucket()/saveTmpFile() 包成 Error 抛出，直接杀死处理线程。
+        // 这里显式指定到应用私有缓存目录，必定可写，且不依赖系统属性。
+        val dir = File(context.cacheDir, "nanohttpd-tmp").apply { mkdirs() }
+        setTempFileManagerFactory(
+            object : NanoHTTPD.TempFileManagerFactory {
+                override fun create(): NanoHTTPD.TempFileManager =
+                    object : NanoHTTPD.TempFileManager {
+                        private val created = java.util.concurrent.CopyOnWriteArrayList<java.io.File>()
+
+                        override fun clear() {
+                            created.forEach { runCatching { it.delete() } }
+                            created.clear()
+                        }
+
+                        override fun createTempFile(filenameHint: String?): NanoHTTPD.TempFile {
+                            val f = File.createTempFile("ls-", ".tmp", dir)
+                            created.add(f)
+                            return object : NanoHTTPD.TempFile {
+                                override fun delete() {
+                                    f.delete()
+                                }
+
+                                override fun getName(): String = f.absolutePath
+
+                                override fun open(): java.io.OutputStream =
+                                    java.io.FileOutputStream(f)
+                            }
+                        }
+                    }
+            },
+        )
+    }
+
     /** 防重复提交的简单互斥 */
     private val saveLock = Any()
 
@@ -130,9 +166,14 @@ class ReceiverServer(
                 uri == "/ws" -> super.serve(session) // WebSocket 升级交由 openWebSocket
                 else -> json(Response.Status.NOT_FOUND, """{"error":"not_found"}""")
             }
-        } catch (e: Exception) {
-            onLog("[http] error: ${e.message}")
-            json(Response.Status.INTERNAL_ERROR, """{"error":"${e.message?.replace("\"", "'")}"}""")
+        } catch (t: Throwable) {
+            // 必须捕获 Throwable 而非 Exception：NanoHTTPD 2.3.1 的 getTmpBucket()/saveTmpFile()
+            // 在临时文件创建失败时抛的是 Error（如 java.io.tmpdir 不可写），
+            // HTTPSession.execute() 的 catch 链也只抓 SocketException/IOException/ResponseException，
+            // Error 会直接冒泡杀死工作线程并关闭 socket —— 手机端只会看到「连接被重置」。
+            // upload 的 body > MEMORY_STORE_LIMIT(1024B) 必然走临时文件分支，因此这条路径必须兜住。
+            onLog("[http] error(${t.javaClass.simpleName}): ${t.message ?: t.cause?.message}")
+            json(Response.Status.INTERNAL_ERROR, """{"error":"${t.message?.replace("\"", "'")}"}""")
         }
     }
 
@@ -178,7 +219,11 @@ class ReceiverServer(
         val fromDevice = session.headers["x-device-id"]?.take(12) ?: clientId.take(12)
 
         val files = mutableMapOf<String, String>()
+        // body > MEMORY_STORE_LIMIT(1024B) 时 NanoHTTPD 会走临时文件分支，
+        // 这里记录关键节点，便于从电视端日志判断卡在哪一步
+        onLog("[upload] start body=${session.headers["content-length"] ?: "?"}B tmpdir=${context.cacheDir.name}")
         session.parseBody(files) // multipart 落到临时文件（大文件由 NanoHTTPD 自动落盘缓冲，不占堆内存）
+        onLog("[upload] parsed keys=${files.keys.sorted()}")
 
         // NanoHTTPD 2.3.1 实证语义（源码 decodeMultipartFormData）：
         // - 同名控件不覆盖：第 1 个 -> "files"，第 2 个 -> "files2"，第 3 个 -> "files3"...

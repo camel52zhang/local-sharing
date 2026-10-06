@@ -240,7 +240,9 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     } else {
                         LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
                             items(status.log.reversed()) { line ->
-                                Text(line, color = Color(0xCBD5E0), fontSize = 12.sp)
+                                // 深色文字：Material3 浅色主题的弹窗背景是白色，
+                                // 用浅色字会完全看不见（排障时日志形同虚设）
+                                Text(line, color = Color(0xFF1B2430), fontSize = 12.sp)
                             }
                         }
                     }

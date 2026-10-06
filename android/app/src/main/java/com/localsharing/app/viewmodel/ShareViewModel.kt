@@ -264,7 +264,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         _uploading.value = true
         _uploadProgress.value = 0f
         viewModelScope.launch {
-            val ok = ShareApi.uploadFiles(
+            val res = ShareApi.uploadFiles(
                 getApplication(),
                 _baseUrl.value,
                 _token.value,
@@ -275,10 +275,13 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 _uploadProgress.value = if (total > 0) sent.toFloat() / total else 0f
             }
             _uploading.value = false
-            if (ok) {
+            if (res.ok) {
                 _selectedItems.value = emptyList()
+                _error.value = ""
             } else {
-                _error.value = "发送失败，请检查连接"
+                // 带上传服务端的真实原因（HTTP 状态码 / 响应体 / 异常类型），
+                // 只写「请检查连接」无法区分鉴权失败、解析异常与连接中断
+                _error.value = "发送失败：${res.detail.ifBlank { "未知错误" }}"
             }
         }
     }
