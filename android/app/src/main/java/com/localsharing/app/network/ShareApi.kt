@@ -167,11 +167,17 @@ class UriRequestBody(
     private val onProgress: (Long, Long) -> Unit,
 ) : RequestBody() {
     override fun contentType(): MediaType? = "application/octet-stream".toMediaType()
-    override fun contentLength(): Long = declaredSize
+
+    // 必须有 -1 分支：declaredSize 来自 SAF 的 OpenableColumns.SIZE，provider 可能不提供该列
+    // （见 FileUtil.getSize），此时长度未知。返回 0 会让 OkHttp 认为 part 长度为 0 却仍写入 N 字节，
+    // 抛 ProtocolException；返回 -1 则走 chunked 编码，由服务端按实际字节数解析 boundary。
+    override fun contentLength(): Long = if (declaredSize > 0) declaredSize else -1L
 
     override fun writeTo(sink: BufferedSink) {
         val input = context.contentResolver.openInputStream(uri)
             ?: throw IOException("Cannot open uri: $uri")
+        // 总量未知时如实传 -1，让 UI 切到不确定态；否则进度回调不触发，界面会一直停在 0%
+        val total = if (declaredSize > 0) declaredSize else -1L
         input.use {
             val buf = ByteArray(8192)
             var read: Int
@@ -179,7 +185,7 @@ class UriRequestBody(
             while (it.read(buf).also { r -> read = r } != -1) {
                 sink.write(buf, 0, read)
                 sent += read
-                if (declaredSize > 0) onProgress(sent, declaredSize)
+                onProgress(sent, total)
             }
         }
     }

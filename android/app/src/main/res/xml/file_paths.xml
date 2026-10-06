@@ -4,4 +4,6 @@
     <cache-path name="installs" path="installs/" />
     <!-- API 28- 打开已接收文件：直接共享公共 Downloads/local-sharing 下的文件（含子目录） -->
     <external-path name="lsdownloads" path="Download/local-sharing/" />
+    <!-- API 24-28 兜底：公共目录不可写时降级到应用私有外部目录，需一并共享否则「打开/安装」会失败 -->
+    <external-files-path name="lsprivate" path="." />
 </paths>

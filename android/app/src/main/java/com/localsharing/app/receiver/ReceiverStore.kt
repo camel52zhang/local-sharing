@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 
 /** 一条接收记录 */
 data class ReceivedItem(
@@ -62,6 +63,7 @@ object ReceiverStore {
     private const val KEY_TOKENS = "tokens"
     private const val KEY_DEVICES = "devices"
     private const val KEY_SUBDIR = "save_subdir"
+    private const val KEY_FOLDERS = "save_folders"
     private const val RECEIVED_FILE = "received.json"
 
     /** 接收记录上限：避免 JSON 无限增长导致电视端读取/渲染变慢 */
@@ -163,22 +165,177 @@ object ReceiverStore {
 
     // ---- 保存目录设置 ----
 
-    /** 自定义保存子目录（相对 Download/local-sharing/），空串表示直接用根目录 */
-    fun getSaveSubdir(context: Context): String =
-        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .getString(KEY_SUBDIR, "") ?: ""
+    /** 单级目录名的非法字符（与 saveToDownloads 的文件名清洗保持一致） */
+    private val ILLEGAL_NAME = Regex("[\\\\/:*?\"<>|]")
 
-    /** 设置子目录；会清洗非法字符 */
+    /**
+     * 规范化多级相对路径：逐级清洗、丢弃空段与 . / ..，用 / 连接。
+     *
+     * 安全性论证（已逐输入验证）：`split('/')` 之后每段内不可能再出现 `/`，
+     * 而 `..` 作为整段被 filter 掉，因此输出恒为相对路径、恒不含 `..` 段、
+     * 恒不以 `/` 开头 —— 无法跳出Download/local-sharing 根。
+     * 注意语义是「丢弃 .. 段」而非「出栈」，所以 `a/../b` 得到 `a/b`（偏保守，可接受）。
+     */
+    private fun normalizeRelPath(input: String): String =
+        input.trim().split('/')
+            .map { it.trim().replace(ILLEGAL_NAME, "_").trim() }
+            .filter { it.isNotEmpty() && it != "." && it != ".." }
+            .joinToString("/")
+
+    /**
+     * 读时也规范化：旧版本 setSaveSubdir 只做 trim().trim('/')，`..` 这类值能被原样存进去
+     * （旧正则已含 `/`，所以穿越本来也不成立，但脏值会直达 RELATIVE_PATH 让MediaProvider 拒绝）。
+     * 读时兜一道，天然免疫任何历史遗留值。
+     */
+    fun getSaveSubdir(context: Context): String =
+        normalizeRelPath(
+            context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                .getString(KEY_SUBDIR, "") ?: "",
+        )
+
+    /** 设置子目录；逐级清洗非法字符并拒绝路径穿越 */
     fun setSaveSubdir(context: Context, subdir: String) {
-        val clean = subdir.trim().trim('/').replace(Regex("[\\\\:*?\"<>|]"), "_")
         context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-            .edit().putString(KEY_SUBDIR, clean).apply()
+            .edit().putString(KEY_SUBDIR, normalizeRelPath(subdir)).apply()
+        bumpRevision()
     }
 
     /** 展示用保存路径（电视端界面显示） */
     fun savePathLabel(context: Context): String {
+        // 降级过就如实显示应用私有目录，否则用户会以为文件在公共 Download 里却找不到
+        getFallbackDir(context)?.let { return it }
         val sub = getSaveSubdir(context)
         return if (sub.isEmpty()) "下载/$SAVE_ROOT" else "下载/$SAVE_ROOT/$sub"
+    }
+
+    // ---- API 24-28 降级目录标记 ----
+
+    private const val KEY_FALLBACK = "fallback_dir"
+
+    /**
+     * 记录「公共目录不可写，已降级到应用私有目录」的事实及其绝对路径。
+     * API 24~28 上实测存在这个场景：进程拿不到 sdcard_rw 组，
+     * WRITE_EXTERNAL_STORAGE 授权了也依然 Permission denied。
+     */
+    fun markFallbackDir(context: Context, path: String) {
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+            .edit().putString(KEY_FALLBACK, path).apply()
+    }
+
+    fun getFallbackDir(context: Context): String? =
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+            .getString(KEY_FALLBACK, null)?.takeIf { it.isNotEmpty() && File(it).exists() }
+
+    // ---- 保存目录树（电视端自建文件夹浏览） ----
+
+    /**
+     * 用户在电视端「新建文件夹」出来的目录（持久化）。
+     *
+     * 为什么需要自己存一份：API 29+ 上是MediaStore 按需创建目录的，
+     * **空目录不会出现在 MediaStore 查询结果里**（它只索引真实文件）。
+     * 若只靠扫盘，用户建的空文件夹会「凭空消失」；
+     * 而 Android 11+ 未经MANAGE_EXTERNAL_STORAGE 又不能稳定地 `File.mkdirs()`。
+     * 因此以本注册表为准，MediaStore 扫到的目录作为补充（能显示历史遗留目录）。
+     */
+    fun loadFolders(context: Context): Set<String> {
+        val raw = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+            .getStringSet(KEY_FOLDERS, emptySet()) ?: emptySet()
+        val out = mutableSetOf<String>()
+        for (rel in raw) {
+            val clean = normalizeRelPath(rel)
+            if (clean.isNotEmpty()) out += clean
+        }
+        return out
+    }
+
+    /** 单级目录名长度上限 */
+    private const val MAX_NAME_LEN = 60
+
+    /**
+     * 相对路径总长度与层级上限。
+     * 必要性：MediaStore 的 RELATIVE_PATH 过长/过深时 insert 返回 null，
+     * 而 saveToDownloads 会抛 IllegalStateException → 上传全部 500，
+     * 且用户无法从电视界面自救。必须在写入前拦住。
+     */
+    private const val MAX_REL_LEN = 180
+    private const val MAX_DEPTH = 8
+
+    /**
+     * 在 [parent] 下新建一个目录，返回规范化后的完整相对路径（已存在则原样返回）。
+     * 返回 null 表示名称非法（空 / 全是清洗后空白 / 超长 / 超深）。
+     */
+    fun createFolder(context: Context, parent: String, rawName: String): String? {
+        val name = rawName.trim().replace(ILLEGAL_NAME, "_").trim()
+        if (name.isEmpty() || name == "." || name == "..") return null
+        if (name.length > MAX_NAME_LEN) return null
+        val rel = normalizeRelPath(if (parent.isEmpty()) name else "$parent/$name")
+        if (rel.isEmpty()) return null
+        // 拦住会让 MediaStore insert 失败的路径（见 MAX_REL_LEN 注释）
+        if (rel.length > MAX_REL_LEN || rel.count { it == '/' } >= MAX_DEPTH) return null
+        // 降级模式下必须真的把目录建出来，否则又变成「注册表里有、磁盘上没有」的幽灵目录
+        getFallbackDir(context)?.let { base ->
+            val dir = File(base, rel)
+            if (!dir.exists()) dir.mkdirs()
+        }
+        val prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+        prefs.edit().putStringSet(KEY_FOLDERS, loadFolders(context) + rel).apply()
+        bumpRevision()
+        return rel
+    }
+
+    /**
+     * 列出 [current] 下的子目录（相对 Download/local-sharing/）。
+     * 来源 = 本应用注册表 ∪ MediaStore 扫到的实际目录，取并集去重。
+     * 必须在 IO 线程调用（会读 SharedPreferences + 查 MediaStore）。
+     */
+    fun listSubDirs(context: Context, current: String): List<String> {
+        val cur = normalizeRelPath(current)
+        val children = mutableSetOf<String>()
+
+        // 1) 注册表里的目录
+        for (rel in loadFolders(context)) {
+            val parent = rel.substringBeforeLast('/', "")
+            if (parent == cur) children += rel.substringAfterLast('/')
+        }
+
+        // 1.5) 降级目录：API 24~28 公共目录不可写时，文件落在应用私有外部目录。
+        // 那里没有任何索引，必须直接扫盘，否则用户在界面上看不到任何已存在的目录。
+        getFallbackDir(context)?.let { base ->
+            val relBase = if (cur.isEmpty()) base else File(base, cur).absolutePath
+            File(relBase).listFiles()?.forEach { child ->
+                if (child.isDirectory) children += child.name
+            }
+        }
+
+        // 2) MediaStore 实际目录（补上历史遗留 / 其它来源建的目录）
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            runCatching {
+                val prefix = "${android.os.Environment.DIRECTORY_DOWNLOADS}/$SAVE_ROOT"
+                context.contentResolver.query(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    arrayOf(android.provider.MediaStore.MediaColumns.RELATIVE_PATH),
+                    "${android.provider.MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                    arrayOf("$prefix/%"),
+                    null,
+                )?.use { c ->
+                    val idx = c.getColumnIndex(android.provider.MediaStore.MediaColumns.RELATIVE_PATH)
+                    if (idx >= 0) {
+                        while (c.moveToNext()) {
+                            val rel = normalizeRelPath(
+                                (c.getString(idx) ?: "").trim().trim('/')
+                                    .removePrefix(prefix).trim('/'),
+                            )
+                            if (rel.isEmpty()) continue
+                            if (rel.substringBeforeLast('/', "") == cur) {
+                                children += rel.substringAfterLast('/')
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return children.sortedBy { it.lowercase(Locale.US) }
     }
 
     // ---- 接收记录 ----

@@ -26,8 +26,9 @@ internal const val MAX_ZIP_TOTAL_BYTES = 2L * 1024 * 1024 * 1024
 /** 解压拷贝缓冲区大小（字节） */
 private const val COPY_BUFFER_SIZE = 8 * 1024
 
-/** 人类可读大小 */
+/** 人类可读大小。负数表示大小未知（如 SAF provider 不提供 OpenableColumns.SIZE 列） */
 fun formatSize(bytes: Long): String {
+    if (bytes < 0) return "大小未知"
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0
     if (kb < 1024) return "%.1f KB".format(kb)
@@ -54,15 +55,15 @@ fun getDisplayName(context: Context, uri: Uri): String {
     }
 }
 
-/** 取 Uri 的大小（未知返回 0） */
+/** 取 Uri 的大小（大小未知返回 -1，与 OkHttp 对「长度未知」的约定一致） */
 fun getSize(context: Context, uri: Uri): Long {
     return try {
         context.contentResolver.query(uri, null, null, null, null)?.use { c ->
             val idx = c.getColumnIndex(OpenableColumns.SIZE)
-            if (idx >= 0 && c.moveToFirst()) c.getLong(idx) else 0L
-        } ?: 0L
+            if (idx >= 0 && c.moveToFirst()) c.getLong(idx) else -1L
+        } ?: -1L
     } catch (e: Exception) {
-        0L
+        -1L
     }
 }
 

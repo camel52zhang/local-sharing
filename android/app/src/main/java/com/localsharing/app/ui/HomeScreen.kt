@@ -293,14 +293,20 @@ fun HomeScreen(vm: ShareViewModel) {
                                 if (uploading) {
                                     CircularProgressIndicator(modifier = Modifier.height(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                                     Spacer(Modifier.height(8.dp))
-                                    Text(" ${(progress * 100).toInt()}%")
+                                    // progress < 0 = 总量未知（provider 不提供 SIZE 列），不显示误导性的 0%
+                                    Text(if (progress < 0f) " 正在发送…" else " ${(progress * 100).toInt()}%")
                                 } else {
                                     Text("发送到电脑")
                                 }
                             }
                             if (uploading) {
                                 Spacer(Modifier.height(8.dp))
-                                LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                                if (progress < 0f) {
+                                    // 不带 progress 参数 = 不确定态动画
+                                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                } else {
+                                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                                }
                             }
                         }
                     }

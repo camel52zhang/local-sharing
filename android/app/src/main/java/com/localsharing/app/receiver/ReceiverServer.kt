@@ -225,26 +225,46 @@ class ReceiverServer(
         session.parseBody(files) // multipart 落到临时文件（大文件由 NanoHTTPD 自动落盘缓冲，不占堆内存）
         onLog("[upload] parsed keys=${files.keys.sorted()}")
 
-        // NanoHTTPD 2.3.1 实证语义（源码 decodeMultipartFormData）：
-        // - 同名控件不覆盖：第 1 个 -> "files"，第 2 个 -> "files2"，第 3 个 -> "files3"...
-        // - 原始文件名按部分顺序存入 parameters["files"] 列表
-        val filenames = session.parameters["files"] ?: emptyList()
+        // NanoHTTPD 2.3.1 实证语义（官方源码 decodeMultipartFormData + 桌面 JVM 实测确认，
+        // 见 .build-tmp/tv_verify5/Probe.java）：
+        //  - 计数器 pcount 只在「解析到非空 filename 属性」时递增（源码 :754-763 的 if (!fileName.isEmpty())），
+        //    所以普通字段（如 asFolder）不会占用文件序号。
+        //  - 同名 part 的 partName 会被就地改写为 name + pcount，故实际 key 依次是
+        //    files / files1 / files2 ...；若客户端自己传了 files2/files3，则改写成 files21/files32
+        //    （实测 S2），即 key 名不可预测，不能用循环递增下标去猜。
+        //  - 关键：files map 的 key 与 parameters 的 key 是同一套命名，一一对应
+        //    （files[key] = 临时文件路径，parameters[key] = [该 part 的原始文件名]），
+        //    而 parameters["files"] 只含第 1 个 part，长度恒为 1。
+        // 因此这里直接遍历 files map 并按同 key 取原始文件名，不再用自增下标索引两套序列。
         val asFolder = (session.parameters["asFolder"]?.firstOrNull() ?: "0") == "1"
 
         val saved = mutableListOf<Pair<String, Long>>()
-        var i = 0
-        while (true) {
-            val key = if (i == 0) "files" else "files$i"
-            val tmpPath = files[key] ?: break
+        var partIndex = 0
+        for ((key, tmpPath) in files) {
             val tmp = File(tmpPath)
-            if (tmp.exists()) {
-                val original = filenames.getOrNull(i)?.takeIf { it.isNotBlank() } ?: "file-$i"
-                val (savedName, size) = saveToDownloads(original, tmp, asFolder)
-                saved += savedName to size
-                onLog("[upload] saved $savedName ($size B)")
+            val declared = session.parameters[key]?.firstOrNull { it.isNotBlank() }
+            // try/finally：saveToDownloads 抛 MediaStore 异常时也要删临时文件，
+            // 否则反复失败会在 cacheDir/nanohttpd-tmp 累积残留。
+            try {
+                if (!tmp.exists()) {
+                    onLog("[upload] WARN part#$partIndex key=$key 临时文件不存在，跳过: $tmpPath")
+                } else {
+                    // 客户端确实没传 filename 时才退化命名，且记日志便于排查
+                    val original = declared ?: run {
+                        onLog("[upload] WARN part#$partIndex key=$key 缺少 filename，退化为占位名")
+                        "file-${partIndex + 1}"
+                    }
+                    val (savedName, size) = saveToDownloads(original, tmp, asFolder)
+                    saved += savedName to size
+                    onLog("[upload] saved part#$partIndex key=$key as=$savedName ($size B)")
+                }
+            } finally {
+                tmp.delete()
             }
-            tmp.delete()
-            i++
+            partIndex++
+        }
+        if (partIndex > 0 && saved.size != partIndex) {
+            onLog("[upload] WARN 解析到 $partIndex 个文件 part，实际落盘 ${saved.size} 个，存在丢失")
         }
         if (saved.isEmpty()) {
             return json(Response.Status.BAD_REQUEST, """{"error":"no_files"}""")
@@ -292,9 +312,13 @@ class ReceiverServer(
             val uri = context.contentResolver.insert(
                 MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
             ) ?: throw IllegalStateException("MediaStore insert failed")
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                FileInputStream(tmp).use { it.copyTo(out) }
-            }
+            // 不能用 ?.use —— openOutputStream 返回 null 时整段会被静默跳过、不抛任何异常，
+            // 随后却按 tmp.length() 上报大小，表现为「记录显示 12MB、实际 0 字节」且无任何日志。
+            // 必须显式抛，且上报真实写入字节数（部分写入时也能如实反映）。
+            val out = context.contentResolver.openOutputStream(uri)
+                ?: throw IllegalStateException("openOutputStream returned null for $uri")
+            var written: Long
+            out.use { o -> written = FileInputStream(tmp).use { it.copyTo(o) } }
             // MediaStore 遇到同名文件会自动改名（如 photo.jpg -> photo (1).jpg）。
             // 必须回读真实落盘名并记录，否则「打开/安装」按 DISPLAY_NAME 反查会命中旧文件。
             val actualName = try {
@@ -304,16 +328,53 @@ class ReceiverServer(
             } catch (e: Exception) {
                 finalName
             }
-            return actualName to tmp.length()
+            return actualName to written
         }
-        // API 28-：直接写公共 Downloads 目录（已有 WRITE_EXTERNAL_STORAGE 权限）
+        // API 28-：优先写公共 Downloads；实测在 API 24~28 上这一步可能因
+        // 平台限制失败（进程拿不到 sdcard_rw 组 → mkdirs 静默失败 / 写入 Permission denied），
+        // 此时自动降级到应用私有外部目录（无需任何权限，必定可写），并回报真实路径。
         val sub = ReceiverStore.getSaveSubdir(context)
-        val dir = File(
+        val publicDir = File(
             android.os.Environment
                 .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
             if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
         )
-        dir.mkdirs()
+        if (publicDir.canWrite() || publicDir.mkdirs()) {
+            try {
+                val (name, size) = writeToDir(publicDir, finalName, tmp)
+                onLog("[save] 落盘公共目录: ${publicDir.absolutePath}/$name")
+                return name to size
+            } catch (e: Exception) {
+                // 不能让单次失败把整次上传打成 500：降级继续
+                onLog("[save] WARN 公共目录写入失败，降级到应用目录: ${e.message}")
+            }
+        } else {
+            onLog("[save] WARN 公共目录不可写（mkdirs 未成功），降级到应用目录")
+        }
+        // 兜底：getExternalFilesDir 属于应用私有，无需任何运行时权限，API 24+ 均可写
+        val privBase = context.getExternalFilesDir(null)
+            ?: throw IllegalStateException("getExternalFilesDir 返回 null，无法落盘")
+        val privDir = File(privBase, if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub")
+        val (name, size) = writeToDir(privDir, finalName, tmp)
+        onLog("[save] 已降级落盘到应用目录: ${privDir.absolutePath}/$name")
+        // 真实路径回报给上层，用于「打开文件」时定位
+        lastFallbackPath = privDir.absolutePath
+        ReceiverStore.markFallbackDir(context, privDir.absolutePath)
+        return name to size
+    }
+
+    /**
+     * 上一次落盘是否走了降级目录（应用私有外部目录）及其绝对路径。
+     * API 24~28 上公共目录可能不可写，此时「打开/安装」必须用私有路径而非公共路径反查。
+     */
+    @Volatile
+    var lastFallbackPath: String? = null
+
+    /** 写入指定目录，同名自动加 (1) 后缀；返回 (实际文件名, 实际字节数) */
+    private fun writeToDir(dir: File, finalName: String, tmp: File): Pair<String, Long> {
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw IllegalStateException("mkdirs failed: ${dir.absolutePath}")
+        }
         var f = File(dir, finalName)
         var i = 1
         while (f.exists()) {
@@ -325,8 +386,9 @@ class ReceiverServer(
             )
             i++
         }
-        FileInputStream(tmp).use { input -> f.outputStream().use { input.copyTo(it) } }
-        return f.name to f.length()
+        var written: Long
+        f.outputStream().use { input -> written = FileInputStream(tmp).use { it.copyTo(input) } }
+        return f.name to written
     }
 
     private fun guessMime(name: String): String {

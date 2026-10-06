@@ -24,6 +24,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -67,6 +70,17 @@ import java.util.Locale
  * 为遥控器/D-pad 优化：可聚焦元素仅按钮类。
  */
 class TvReceiverActivity : ComponentActivity() {
+    companion object {
+        /**
+         * 「在线」判据的兜底宽限期：DevicePresence 是纯内存 object，[ReceiverServer.stop] 会 clear()，
+         * 电视服务被系统回收后手机侧的 WS 可能并未真正断开。此时用 lastSeen（每次注册由
+         * upsertDevice 刷新）兜底，避免服务一重启就把所有设备误判为离线。
+         */
+        internal const val ONLINE_GRACE_MS = 120_000L
+
+        /** API 28- 写公共存储的运行时权限请求码 */
+        private const val REQ_WRITE_EXTERNAL = 2001
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,6 +93,22 @@ class TvReceiverActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        // API 23-28：写公共 Downloads 目录需要运行时授权（Android 6.0 引入运行时权限）。
+        // 之前只声明未申请，API 28 实测 mkdirs 静默失败 → 上传全部 500。
+        // 拒绝也没关系：ReceiverServer 会降级到应用私有外部目录，只是文件不在公共 Download 目录。
+        //
+        // 下界必须收在 23：checkSelfPermission/requestPermissions 都是 API 23 才有的方法
+        // （Android 6.0 之前权限在安装时一次性授予，无需也不能运行时申请）。
+        // 原来的条件写成 SDK_INT <= 28，在 Android 5.0(21) 上恰好为真 → NoSuchMethodError 闪退。
+        if (Build.VERSION.SDK_INT in 23..28 &&
+            checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                REQ_WRITE_EXTERNAL,
+            )
         }
         setContent {
             LocalSharingTheme {
@@ -124,6 +154,11 @@ private fun ReceiverScreen(onStop: () -> Unit) {
         devices = d
     }
 
+    // 设备名映射：displayName() 会读 SharedPreferences + 解析 JSON，
+    // 若放进 items{} 的 item lambda 就是「每次重组 × 每行」重复读盘，
+    // 这是电视上界面抖动的真正来源。提到这里随 devices 一起 memo。
+    val nameById = remember(devices) { devices.associate { it.clientId to it.name } }
+
     MaterialTheme {
         Row(
             modifier = Modifier
@@ -139,11 +174,16 @@ private fun ReceiverScreen(onStop: () -> Unit) {
             ) {
                 Text("手机扫码，直传电视", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(16.dp))
-                val url = if (status.running) "http://${status.lanIp}:${status.port}" else ""
-                if (url.isNotEmpty()) {
+                // 无可用网卡时 lanIp 为空串，此时拼出的 "http://:8080" 是废二维码，
+                // 手机扫码必然失败且电视端看不出异常，所以必须显式区分「没起来」和「没 IP」。
+                val hasUrl = status.running && status.lanIp.isNotBlank()
+                val url = if (hasUrl) "http://${status.lanIp}:${status.port}" else ""
+                if (hasUrl) {
                     QrImage(url, 270.dp)
                     Spacer(Modifier.height(12.dp))
                     Text(url, color = Color(0xFF9AE6B4), fontSize = 20.sp)
+                } else if (status.running) {
+                    Text("未连接网络，无法生成配对码", color = Color(0xFF8899A6), fontSize = 20.sp)
                 } else {
                     Text("服务启动中…", color = Color(0xFFFFB74D), fontSize = 20.sp)
                 }
@@ -197,7 +237,7 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     items(received, key = { it.id }) { item ->
                         ReceivedRow(
                             item = item,
-                            fromName = ReceiverStore.displayName(context, item.fromDevice),
+                            fromName = nameById[item.fromDevice] ?: item.fromDevice.ifBlank { "未知设备" },
                             onOpen = {
                                 if (item.isApk) installApk(context, item)
                                 else openReceived(context, item)
@@ -261,7 +301,8 @@ private fun DeviceList(devices: List<ReceiverDevice>, online: Set<String>) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         devices.takeLast(6).reversed().forEach { d ->
-            val isOnline = d.clientId in online
+            val isOnline = d.clientId in online ||
+                (System.currentTimeMillis() - d.lastSeen) < TvReceiverActivity.ONLINE_GRACE_MS
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     if (isOnline) "●" else "○",
@@ -285,38 +326,184 @@ private fun DeviceList(devices: List<ReceiverDevice>, online: Set<String>) {
     }
 }
 
+/**
+ * 保存位置对话框：应用内自建的目录树浏览器。
+ *
+ * 为什么不用系统文件选择器（ACTION_OPEN_DOCUMENT_TREE）：实测 AOSP TV 镜像里
+ * com.android.documentsui 根本不存在，该 Intent 被 frameworkpackagestubs 的占位
+ * activity 静默吸收（不崩溃、无UI、直接 RESULT_CANCELED），装第三方文件管理器也无效
+ * （文件管理器是 DocumentsProvider，不是 picker）。故改为自建目录树。
+ *
+ * 交互：←/→ 或 D-pad 在目录间移动，「进入」下钻，「返回」上一级，
+ * 「新建文件夹」弹出输入框。所有可交互元素均为 Button/TextField，天然可聚焦。
+ */
 @Composable
 private fun SaveLocationDialog(
     initial: String,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var text by remember { mutableStateOf(initial) }
+    val context = LocalContext.current
+    // 单一状态：当前浏览位置 == 将要保存的位置（导航即选择）。
+    // 早期版本拆成 cwd/picked 两个状态，导致「进到电影后按确认」仍存根目录——
+    // 两个值在 UI 上并排显示且样式相同，用户无从分辨哪个是落盘目标。
+    var cwd by remember { mutableStateOf(initial) }
+    var kids by remember { mutableStateOf(emptyList<String>()) }
+    var loading by remember { mutableStateOf(true) }
+    var showNew by remember { mutableStateOf(false) }
+
+    // 目录扫描要读 SharedPreferences + 查 MediaStore，必须在 IO 线程。
+    // 状态与 cwd 绑定成一份，避免切目录那一帧用「新面包屑 + 旧列表」拼出不存在路径。
+    var viewCwd by remember { mutableStateOf(initial) }
+    var viewKids by remember { mutableStateOf(emptyList<String>()) }
+    LaunchedEffect(cwd) {
+        loading = true
+        val list = try {
+            withContext(Dispatchers.IO) { ReceiverStore.listSubDirs(context, cwd) }
+        } catch (t: Throwable) {
+            // 不让单个目录读取失败把对话框卡在「读取中…」
+            emptyList()
+        }
+        viewKids = list
+        viewCwd = cwd
+        loading = false
+    }
+    kids = viewKids
+    val fresh = viewCwd == cwd
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("保存位置") },
+        title = { Text("选择保存文件夹") },
+        text = {
+            Column {
+                // 面包屑：当前位置 == 落盘目标
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            if (cwd.isNotEmpty()) cwd = cwd.substringBeforeLast('/', "")
+                        },
+                        enabled = cwd.isNotEmpty(),
+                        modifier = Modifier.width(88.dp),
+                    ) { Text("返回") }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "下载/${ReceiverStore.SAVE_ROOT}" + if (cwd.isEmpty()) "" else "/$cwd",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "文件将存入上面这个目录",
+                    color = Color(0xFF5A6672),
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(10.dp))
+
+                if (loading) {
+                    Text("读取中…", fontSize = 13.sp)
+                } else if (!fresh) {
+                    Text("读取中…", fontSize = 13.sp)
+                } else if (kids.isEmpty()) {
+                    Text(
+                        "此目录下暂无子文件夹，点下方「新建文件夹」创建一个。",
+                        color = Color(0xFF5A6672),
+                        fontSize = 13.sp,
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.heightIn(max = 220.dp)) {
+                        items(kids, key = { it }) { name ->
+                            val child = if (cwd.isEmpty()) name else "$cwd/$name"
+                            // 每行只留一个可聚焦元素：双按钮会让 D-pad 下键要按两次
+                            // 才推进一行，目录一多就是「按 N 次换 1 屏」。
+                            OutlinedButton(
+                                onClick = { cwd = child },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                            ) { Text("📁 $name", maxLines = 1) }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { showNew = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("＋ 新建文件夹") }
+            }
+        },
+        confirmButton = { Button(onClick = { onConfirm(cwd) }) { Text("保存到此处") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+
+    if (showNew) {
+        NewFolderDialog(
+            parentPath = cwd,
+            onDismiss = { showNew = false },
+            onConfirm = { rawName ->
+                val rel = ReceiverStore.createFolder(context, cwd, rawName)
+                showNew = false
+                if (rel == null) {
+                    Toast.makeText(context, "名称无效（不能为空/含非法字符/过长或层级太深）", Toast.LENGTH_SHORT).show()
+                } else {
+                    cwd = rel
+                }
+            },
+        )
+    }
+}
+
+/**
+ * 新建文件夹的名称输入。
+ *
+ * TV 上不能只靠 OutlinedTextField：实测这台 AOSP TV 确实装了 LatinIME（默认 IME），
+ * 但 TV 版的 IME 布局与手机差异很大，D-pad 能否可靠打出中文未经验证，
+ * 因此额外提供**常用目录名一键按钮**作为不依赖 IME 的兜底路径。
+ * （预设名走的是 createFolder，与手输路径完全同一条代码。）
+ */
+@Composable
+private fun NewFolderDialog(
+    parentPath: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    val presets = listOf("电影", "音乐", "照片", "文档", "安装包")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建文件夹") },
         text = {
             Column {
                 Text(
-                    "文件保存在「下载/local-sharing」下。可填写子目录名（留空则直接用根目录）。",
+                    "位置：下载/${ReceiverStore.SAVE_ROOT}" +
+                        if (parentPath.isEmpty()) "" else "/$parentPath",
                     fontSize = 13.sp,
                 )
                 Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
+                    value = name,
+                    onValueChange = { name = it },
                     singleLine = true,
-                    label = { Text("子目录，如 电影 / tv") },
+                    label = { Text("文件夹名称（可直接点下方预设）") },
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "最终位置：下载/local-sharing/" + text.trim().trim('/'),
-                    color = Color(0xFF5A6672),
-                    fontSize = 12.sp,
-                )
+                Spacer(Modifier.height(10.dp))
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.heightIn(max = 130.dp),
+                ) {
+                    items(presets) { p ->
+                        OutlinedButton(
+                            onClick = { name = p },
+                            modifier = Modifier.padding(2.dp),
+                        ) { Text(p, maxLines = 1) }
+                    }
+                }
             }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text) }) { Text("确定") } },
+        confirmButton = {
+            Button(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) { Text("创建") }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
@@ -380,7 +567,10 @@ private fun QrImage(content: String, size: Dp) {
     Image(bitmap = bitmap, contentDescription = "连接二维码", modifier = Modifier.size(size))
 }
 
+// 负数表示大小未知（见 FileUtil.getSize：SAF provider 可能不提供 OpenableColumns.SIZE 列），
+// 直接落到 else 会输出字面量 "-1 B"
 private fun formatSize(bytes: Long): String = when {
+    bytes < 0 -> "大小未知"
     bytes >= (1L shl 30) -> "%.1f GB".format(bytes / 1073741824.0)
     bytes >= (1L shl 20) -> "%.1f MB".format(bytes / 1048576.0)
     bytes >= (1L shl 10) -> "%.1f KB".format(bytes / 1024.0)
@@ -442,15 +632,11 @@ private fun openReceived(context: android.content.Context, item: ReceivedItem) {
                 },
             )
         } else {
-            val sub = ReceiverStore.getSaveSubdir(context)
-            val dir = File(
-                android.os.Environment
-                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-                if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
-            )
-            val f = File(dir, item.name)
-            if (!f.exists()) {
-                Toast.makeText(context, "文件已不在下载目录", Toast.LENGTH_SHORT).show()
+            // API 24-28：先找应用私有降级目录（API28 上公共目录可能不可写，
+            // 见 ReceiverServer.saveToDownloads 的降级逻辑），再退回公共目录
+            val f = locateReceivedFile(context, item.name)
+            if (f == null) {
+                Toast.makeText(context, "文件已不在接收目录", Toast.LENGTH_SHORT).show()
                 return
             }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", f)
@@ -466,7 +652,14 @@ private fun openReceived(context: android.content.Context, item: ReceivedItem) {
     }
 }
 
-/** 按显示名在公共 Downloads 中查 content URI */
+/**
+ * 按显示名在公共 Downloads 中查 content URI。
+ *
+ * 只允许在 API 29+ 调用：MediaStore.Downloads 及其 EXTERNAL_CONTENT_URI 是 API 29 才有的
+ * （API 28 及以下连该列在 MediaProvider 里都不存在，实测报 "no such column: relative_path"）。
+ * 唯一调用点openReceived 的 `SDK_INT >= 29` 分支内，Lint 跨函数看不出来所以标了 @RequiresApi。
+ */
+@androidx.annotation.RequiresApi(29)
 private fun findDownloadsUri(context: android.content.Context, displayName: String): Uri? {
     context.contentResolver.query(
         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
@@ -503,7 +696,31 @@ private fun guessMime(name: String): String {
     }
 }
 
-/** 按显示名从公共 Downloads（含子目录）读取文件内容到 target；找不到返回 false */private fun copyFromDownloads(
+/**
+ * API 24-28 定位已接收文件。
+ * 依次尝试：① 当前保存位置下的应用私有降级目录（ReceiverServer 在公共目录不可写时用）
+ *          ② 当前保存位置下的公共 Downloads 子目录
+ * 都找不到返回 null。
+ */
+private fun locateReceivedFile(context: android.content.Context, displayName: String): File? {
+    val sub = ReceiverStore.getSaveSubdir(context)
+    val rel = if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub"
+    val candidates = buildList {
+        context.getExternalFilesDir(null)?.let { add(File(it, rel)) }
+        add(
+            File(
+                android.os.Environment
+                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                rel,
+            ),
+        )
+    }
+    return candidates.firstOrNull { File(it, displayName).exists() }
+        ?.let { File(it, displayName) }
+}
+
+/** 按显示名从公共 Downloads（含子目录）读取文件内容到 target；找不到返回 false */
+private fun copyFromDownloads(
     context: android.content.Context,
     displayName: String,
     target: File,
@@ -528,13 +745,7 @@ private fun guessMime(name: String): String {
         }
         return false
     }
-    val sub = ReceiverStore.getSaveSubdir(context)
-    val dir = File(
-        android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-        if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
-    )
-    val source = File(dir, displayName)
-    if (!source.exists()) return false
+    val source = locateReceivedFile(context, displayName) ?: return false
     source.inputStream().use { input -> target.outputStream().use { input.copyTo(it) } }
     return true
 }
