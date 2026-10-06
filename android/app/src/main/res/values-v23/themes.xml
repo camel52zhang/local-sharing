@@ -1,0 +1,11 @@
+<resources>
+    <!--
+      API 23+ 专用：windowLightStatusBar 从 API 23 才存在（深色状态栏背景 + 深色图标）。
+      放在 values-v23 里，API 21/22（Android 5.0/5.1）不会解析到该属性。
+    -->
+    <style name="Theme.LocalSharing" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

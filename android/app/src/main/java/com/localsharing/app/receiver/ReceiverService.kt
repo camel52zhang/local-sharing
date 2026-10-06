@@ -35,7 +35,15 @@ class ReceiverService : Service() {
         val status: StateFlow<ReceiverStatus> = _status.asStateFlow()
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, ReceiverService::class.java))
+            val i = Intent(context, ReceiverService::class.java)
+            // startForegroundService 是 API 26 才有的方法；在 Android 5.0/6.0 上直接调会
+            // NoSuchMethodError（Error 而非 Exception，外层 catch 不住），必须做版本分支。
+            if (Build.VERSION.SDK_INT >= 26) {
+                context.startForegroundService(i)
+            } else {
+                @Suppress("DEPRECATION")
+                context.startService(i)
+            }
         }
 
         fun stop(context: Context) {
@@ -101,7 +109,8 @@ class ReceiverService : Service() {
         )
         if (started != null) {
             appendLog("[server] listening on $ip:$usedPort")
-            val nm = getSystemService(NotificationManager::class.java)
+            // 同 createChannel：getSystemService(Class) 是 API 23+，这里用 API 1 的 String 重载
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(NOTIF_ID, buildNotification("接收中 · http://$ip:$usedPort"))
         } else {
             appendLog("[server] 启动失败：所有候选端口均被占用")
@@ -152,7 +161,10 @@ class ReceiverService : Service() {
     }
 
     private fun createChannel() {
-        val nm = getSystemService(NotificationManager::class.java)
+        // 注意：必须用 getSystemService(String) 这个 API 1 写法。
+        // Context.getSystemService(Class<T>) 是 API 23 才重载的，在 Android 5.0 上调用会
+        // NoSuchMethodError（Error，不是 Exception），且此处是 onCreate 的第一行 → 启动即崩。
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "电视接收", NotificationManager.IMPORTANCE_LOW),

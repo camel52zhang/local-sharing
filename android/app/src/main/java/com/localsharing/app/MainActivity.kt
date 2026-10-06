@@ -112,9 +112,12 @@ class MainActivity : ComponentActivity() {
         if (pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)) return true
         if (pm.hasSystemFeature(android.content.pm.PackageManager.FEATURE_TELEVISION)) return true
         return try {
-            val umm = getSystemService(android.app.UiModeManager::class.java)
+            // 必须用 getSystemService(String)：Class 重载是 API 23+。
+            // Android 5.0 上会抛 NoSuchMethodError —— 那是 Error 不是 Exception，
+            // 原来的 catch (e: Exception) 根本拦不住，会导致 onCreate 直接崩。
+            val umm = getSystemService(android.content.Context.UI_MODE_SERVICE) as? android.app.UiModeManager
             umm?.currentModeType == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             false
         }
     }

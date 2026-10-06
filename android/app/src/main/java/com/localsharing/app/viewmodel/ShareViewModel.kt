@@ -272,7 +272,9 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 items,
                 asFolder,
             ) { sent, total ->
-                _uploadProgress.value = if (total > 0) sent.toFloat() / total else 0f
+                // total < 0 = 总量未知（SAF provider 不提供 SIZE 列），用 -1f 表达，
+                // UI 据此切到不确定态；写 0f 会让进度永远停在 0%
+                _uploadProgress.value = if (total > 0) sent.toFloat() / total else -1f
             }
             _uploading.value = false
             if (res.ok) {

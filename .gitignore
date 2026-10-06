@@ -29,3 +29,10 @@ portable-staging/
 # 分发补丁副本（与主源码重复，易产生分叉，非源码真值）
 desktop-source-patch/
 deliverables/portable/
+
+# 安卓安装包（构建产物，可由 gradlew assembleRelease 重新生成；每个 ~22-35MB）
+*.apk
+*.idsig
+
+# 本地验证/实验暂存区（模拟器实测脚本、截图、APK 探针产物）
+.build-tmp/

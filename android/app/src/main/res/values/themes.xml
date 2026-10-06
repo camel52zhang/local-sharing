@@ -1,8 +1,12 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Compose 使用的窗口主题（无 ActionBar，透明状态栏由 edge-to-edge 处理） -->
+    <!--
+      Compose 使用的窗口主题（无 ActionBar，透明状态栏由 edge-to-edge 处理）。
+      minSdk = 21（兼容 Android 5.0 电视），所以本文件不使用 android:windowLightStatusBar ——
+      那是 API 23 才引入的属性，在 API 21/22 上不写才不会让 AAPT 报未知属性，
+      状态栏图标用系统默认（白色）。API 23+ 的浅色图标配置见 values-v23/themes.xml。
+    -->
     <style name="Theme.LocalSharing" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

@@ -1,6 +1,7 @@
 package com.localsharing.app.ui
 
 import android.util.Log
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -161,6 +162,9 @@ fun ScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
     }
 }
 
+// ImageProxy.image 是 CameraX 的实验性 API：官方要求显式 opt-in，
+// 缺 @OptIn 会让 lintVitalRelease 报 UnsafeOptInUsageError error（阻断 release 打包与 CI）。
+@androidx.annotation.OptIn(ExperimentalGetImage::class)
 private fun processImage(proxy: ImageProxy, scanner: BarcodeScanner, onResult: (String) -> Unit) {
     val mediaImage = proxy.image
     if (mediaImage == null) {

@@ -19,7 +19,12 @@ android {
 
     defaultConfig {
         applicationId = "com.localsharing.app"
-        minSdk = 24
+        // minSdk = 21（Android 5.0）：用户实测 TCL 65V6-A65F 电视是 Android 5.0，
+        // 原来的 24 会让系统直接拒绝安装（INSTALL_FAILED_OLDER_SDK）。
+        // 21 是能落到的最低点：activity-compose:1.9.3 + 整棵 Compose 依赖树都硬性要求 21，
+        // 降到 20 会在 manifest merger 阶段直接失败。所有 minSdk 24+ 的 API 调用点
+        // （getSystemService(Class)、startForegroundService、checkSelfPermission 等）均已加版本守卫。
+        minSdk = 21
         targetSdk = 34
         versionCode = buildDateCode
         versionName = buildDisplay
@@ -53,6 +58,16 @@ android {
 
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.15"
+    }
+
+    lint {
+        // 本项目不使用 Fragment（入口全是 ComponentActivity + Compose），
+        // InvalidFragmentVersionForActivityResult 在这里是误报。但它默认是 error，
+        // 会让 assembleRelease 报BUILD FAILED，反而掩盖真正的 NewApi 问题，故显式关闭。
+        disable += "InvalidFragmentVersionForActivityResult"
+        // NewApi 保持 error 并显式声明：这是低版本设备闪退的第一道防线。
+        // 2026-10-06 降到minSdk 21 时靠它一次抓出 9 处高版本 API 漏守卫的问题。
+        error += "NewApi"
     }
 
     applicationVariants.all {
