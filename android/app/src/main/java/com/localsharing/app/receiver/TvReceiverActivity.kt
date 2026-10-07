@@ -198,12 +198,16 @@ class TvReceiverActivity : ComponentActivity() {
                     }
                 }
             }
-            // 三参 registerReceiver(receiver, filter, flags) 与 RECEIVER_NOT_EXPORTED
-            // 常量都是 API 26 才有的；API 21-25 只能用两参版本。
-            // 这是 debug-only 的调试广播，低版本用两参注册风险可控（应用未导出）。
+            // ★ 必须显式指定 EXPORTED / NOT_EXPORTED。
+            //实测（API 34 / Android 14）：不指定会抛 SecurityException
+            //   "One of RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED should be specified"，
+            //   导致 hook 注册失败、自动化验证完全做不了。
+            //这里选 EXPORTED：debug-only 测试入口本来就要被 adb shell 触发；
+            // 用 NOT_EXPORTED 会把 shell 广播一并拦掉（实测收不到）。
+            //release 安全性由 BuildConfig.DEBUG=false 保证：函数不会执行到这里。
             if (Build.VERSION.SDK_INT >= 26) {
                 registerReceiver(
-                    receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED,
+                    receiver, filter, android.content.Context.RECEIVER_EXPORTED,
                 )
             } else {
                 @Suppress("UnspecifiedRegisterReceiverFlag")
