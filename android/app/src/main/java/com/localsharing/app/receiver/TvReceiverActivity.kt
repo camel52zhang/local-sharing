@@ -51,6 +51,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.google.zxing.BarcodeFormat
@@ -86,6 +90,12 @@ class TvReceiverActivity : ComponentActivity() {
         const val ACTION_DEBUG_INSTALL = "com.localsharing.app.DEBUG_INSTALL"
         const val EXTRA_FILE_NAME = "file_name"
         const val EXTRA_FILE_SIZE = "file_size"
+
+        /** 仅 debug：触发单条「删除」（删记录 + 删文件） */
+        const val ACTION_DEBUG_DELETE = "com.localsharing.app.DEBUG_DELETE"
+
+        /** 仅 debug：触发「清空记录」（只删记录，保留文件） */
+        const val ACTION_DEBUG_CLEAR = "com.localsharing.app.DEBUG_CLEAR"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -138,34 +148,63 @@ class TvReceiverActivity : ComponentActivity() {
      */
     private fun registerInstallDebugHook() {
         if (!BuildConfig.DEBUG) return
-        val filter = android.content.IntentFilter(ACTION_DEBUG_INSTALL)
+        val filter = android.content.IntentFilter()
+        filter.addAction(ACTION_DEBUG_INSTALL)
+        filter.addAction(ACTION_DEBUG_DELETE)
+        filter.addAction(ACTION_DEBUG_CLEAR)
         filter.addCategory(android.content.Intent.CATEGORY_DEFAULT)
         try {
-            registerReceiver(
-                object : android.content.BroadcastReceiver() {
-                    override fun onReceive(ctx: android.content.Context, intent: Intent) {
-                        val name = intent.getStringExtra(EXTRA_FILE_NAME)
-                        val size = intent.getLongExtra(EXTRA_FILE_SIZE, 0L)
-                        if (name.isNullOrBlank()) {
-                            installLog("DEBUG 广播缺少 $EXTRA_FILE_NAME，中止")
-                            return
+            val receiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(ctx: android.content.Context, intent: Intent) {
+                    when (intent.action) {
+                        ACTION_DEBUG_INSTALL -> {
+                            val name = intent.getStringExtra(EXTRA_FILE_NAME)
+                            val size = intent.getLongExtra(EXTRA_FILE_SIZE, 0L)
+                            if (name.isNullOrBlank()) {
+                                installLog("DEBUG 广播缺少 $EXTRA_FILE_NAME，中止")
+                                return
+                            }
+                            val item = ReceivedItem(
+                                id = "debug-${System.currentTimeMillis()}",
+                                name = name,
+                                size = size,
+                                fromDevice = "debug-hook",
+                                time = System.currentTimeMillis(),
+                                isApk = name.endsWith(".apk", ignoreCase = true),
+                            )
+                            installLog("DEBUG 广播触发安装：$name (${formatSize(size)})")
+                            installApk(this@TvReceiverActivity, item)
                         }
-                        val item = ReceivedItem(
-                            id = "debug-${System.currentTimeMillis()}",
-                            name = name,
-                            size = size,
-                            fromDevice = "debug-hook",
-                            time = System.currentTimeMillis(),
-                            isApk = name.endsWith(".apk", ignoreCase = true),
-                        )
-                        installLog("DEBUG 广播触发安装：$name (${formatSize(size)})")
-                        installApk(this@TvReceiverActivity, item)
+                        ACTION_DEBUG_DELETE -> {
+                            val name = intent.getStringExtra(EXTRA_FILE_NAME).orEmpty()
+                            installLog("DEBUG 广播触发删除：$name")
+                            deleteRecordAndFile(this@TvReceiverActivity, name, name)
+                        }
+                        ACTION_DEBUG_CLEAR -> {
+                            val n = ReceiverStore.loadReceived(this@TvReceiverActivity).size
+                            ReceiverStore.clearReceived(this@TvReceiverActivity)
+                            installLog("DEBUG 广播触发清空记录：$n 条，文件全部保留")
+                            Toast.makeText(
+                                this@TvReceiverActivity,
+                                "已清空 $n 条记录，文件都还在",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
                     }
-                },
-                filter,
-                android.content.Context.RECEIVER_NOT_EXPORTED,
-            )
-            android.util.Log.i(INSTALL_TAG, "DEBUG install hook registered")
+                }
+            }
+            // 三参 registerReceiver(receiver, filter, flags) 与 RECEIVER_NOT_EXPORTED
+            // 常量都是 API 26 才有的；API 21-25 只能用两参版本。
+            // 这是 debug-only 的调试广播，低版本用两参注册风险可控（应用未导出）。
+            if (Build.VERSION.SDK_INT >= 26) {
+                registerReceiver(
+                    receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED,
+                )
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(receiver, filter)
+            }
+            android.util.Log.i(INSTALL_TAG, "DEBUG hook registered (install/delete/clear)")
         } catch (t: Throwable) {
             android.util.Log.e(INSTALL_TAG, "DEBUG hook 注册失败", t)
         }
@@ -249,14 +288,18 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                 )
                 Spacer(Modifier.height(14.dp))
                 Row {
-                    Button(onClick = { showSettings = true }) { Text("保存位置") }
+                    TvButton("保存位置", { showSettings = true })
                     Spacer(Modifier.width(12.dp))
-                    OutlinedButton(onClick = { showLogs = true }) { Text("日志", color = Color.White) }
+                    TvButton("日志", { showLogs = true })
                     Spacer(Modifier.width(12.dp))
-                    OutlinedButton(onClick = {
-                        ReceiverService.stop(context)
-                        onStop()
-                    }) { Text("停止接收", color = Color.White) }
+                    TvButton(
+                        "停止接收",
+                        {
+                            ReceiverService.stop(context)
+                            onStop()
+                        },
+                        danger = true,
+                    )
                 }
             }
 
@@ -275,10 +318,18 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     Text("共 ${received.size} 项", color = Color(0xFF8899A6), fontSize = 13.sp)
                     Spacer(Modifier.width(16.dp))
                     if (received.isNotEmpty()) {
-                        OutlinedButton(onClick = {
+                        // 用户明确要求：「清空记录」只清列表，**不删文件**；
+                        // 只有单条「删除」才彻底删文件。按钮文案直接说明语义。
+                        TvButton("清空记录（保留文件）", {
+                            val n = received.size
                             ReceiverStore.clearReceived(context)
                             received = emptyList()
-                        }) { Text("清空记录", color = Color.White) }
+                            Toast.makeText(
+                                context,
+                                "已清空 $n 条记录，文件都还在",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        })
                     }
                 }
                 Spacer(Modifier.height(10.dp))
@@ -296,7 +347,8 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                                 else openReceived(context, item)
                             },
                             onDelete = {
-                                ReceiverStore.deleteReceived(context, item.id)
+                                // 用户明确要求：「删除」= 删记录 + 从下载目录彻底删文件。
+                                deleteRecordAndFile(context, item.id, item.name)
                                 received = ReceiverStore.loadReceived(context)
                             },
                         )
@@ -561,6 +613,96 @@ private fun NewFolderDialog(
     )
 }
 
+/**
+ * 删除一条接收记录**及其对应的已落盘文件**。
+ *
+ * 用户需求（2026-10-07）：点「删除」要真正把文件从下载目录删掉，
+ * 而「清空记录」只清列表、保留文件。
+ *
+ * 定位复用 [locateReceivedFile] —— 与 openReceived / installApk 同一套逻辑
+ * （应用私有目录优先，再退公共 Download），确保删的就是界面上显示的那个文件。
+ * 返回 true 表示文件确实被删掉了。
+ */
+private fun deleteRecordAndFile(context: android.content.Context, id: String, name: String): Boolean {
+    val file = locateReceivedFile(context, name)
+    val fileGone = file?.let { it.delete() || !it.exists() } ?: false
+    ReceiverStore.deleteReceived(context, id)
+    android.util.Log.i(
+        INSTALL_TAG,
+        "删除 $name：文件${if (fileGone) "已彻底删除" else "未找到（可能已被系统清理）"}" +
+            if (file != null) " @ ${file.absolutePath}" else "",
+    )
+    Toast.makeText(
+        context,
+        if (fileGone) "已删除记录和文件"
+        else "已删除记录（文件未找到，可能已清理）",
+        Toast.LENGTH_SHORT,
+    ).show()
+    return fileGone
+}
+
+/**
+ * D-pad 焦点高亮配色。
+ * 问题：电视没有触屏，全靠遥控器方向键操作。此前全项目**零焦点处理**，
+ * 只靠 Material Button 默认焦点态 —— 在本应用的深色背景（0xFF0E1417 一带）上
+ * 几乎不可辨，用户反馈「要非常认真才能看出选中的是哪个 tab」。
+ *
+ * 方案：焦点态用**高饱和琥珀色实心底 + 深色文字 + 3dp 亮色描边**，
+ * 未聚焦态为深灰描边 + 白字。三个信号叠加（底色/文字色/描边），
+ * 保证在电视亮度下、隔着几米也能一眼看出焦点在哪。
+ */
+private val FocusAmber = Color(0xFFFFB020)
+private val FocusIdleBorder = Color(0xFF3A4550)
+
+/**
+ * 通用焦点高亮按钮：Material Button 在深色背景上焦点态不可辨，这里统一替换。
+ * [primary] 为 true 时用实心高亮（用于「安装」「打开」这类主动作）。
+ */
+@Composable
+private fun TvButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    primary: Boolean = false,
+    danger: Boolean = false,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val bg by animateColorAsState(
+        if (focused) FocusAmber else if (primary) Color(0xFF1F6FEB) else Color(0xFF232C34),
+        label = "tvBtnBg",
+    )
+    val fg by animateColorAsState(
+        when {
+            focused -> Color(0xFF0E1417)                 // 焦点态深色字，在琥珀底上对比最强
+            danger -> Color(0xFFFF8A80)
+            primary -> Color.White
+            else -> Color(0xFFD6DEE6)
+        },
+        label = "tvBtnFg",
+    )
+    Button(
+        onClick = onClick,
+        modifier = modifier
+            .border(
+                width = if (focused) 3.dp else 1.dp,
+                color = if (focused) FocusAmber else FocusIdleBorder,
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+            )
+            .focusable()
+            .onFocusChanged { focused = it.isFocused },
+        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+            containerColor = bg,
+            contentColor = fg,
+        ),
+    ) {
+        // 焦点态加粗 + 前置标记，三重信号叠加
+        Text(
+            if (focused) "▶ $text" else text,
+            fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+        )
+    }
+}
+
 @Composable
 private fun ReceivedRow(
     item: ReceivedItem,
@@ -586,12 +728,13 @@ private fun ReceivedRow(
         }
         Spacer(Modifier.width(12.dp))
         if (item.isApk) {
-            Button(onClick = onOpen) { Text("安装") }
+            TvButton("安装", onOpen, primary = true)
         } else {
-            OutlinedButton(onClick = onOpen) { Text("打开", color = Color.White) }
+            TvButton("打开", onOpen)
         }
         Spacer(Modifier.width(8.dp))
-        OutlinedButton(onClick = onDelete) { Text("删除", color = Color(0xFF8899A6)) }
+        // 「删除」现在会连文件一起删，用红色+ 明确文案，避免误触
+        TvButton("删除文件", onDelete, danger = true)
     }
 }
 
