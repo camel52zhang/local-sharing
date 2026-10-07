@@ -30,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,6 +64,11 @@ fun DevicePickerScreen(
     val devices by vm.devices.collectAsState()
     val active by vm.activeDevice.collectAsState()
     val conn by vm.connState.collectAsState()
+
+    // ★ 系统返回键必须被接管。只在顶栏箭头 onClick 里处理 onBack是不够的 ——
+    // 电视/手机的实体返回键、 gesturer back手势走的都是这里，
+    // 不注册的话用户在「已断开」状态下会被困在这一页（QA 在 P1-2 抓到的）。
+    BackHandler(onBack = onBack)
     val uploading by vm.uploading.collectAsState()
     val error by vm.error.collectAsState()
     val dup by vm.pendingDup.collectAsState()

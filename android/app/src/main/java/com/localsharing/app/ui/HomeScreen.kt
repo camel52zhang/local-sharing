@@ -87,19 +87,24 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
 
     val targetLabel = activeDevice?.label.orEmpty()
     val snackbarHostState = remember { SnackbarHostState() }
+    val noticeHostState = remember { SnackbarHostState() }
     var showLog by remember { mutableStateOf(false) }
     val crashedLastRun = remember { CrashLogCollector.lastRunCrashed }
     LaunchedEffect(error) {
-        if (error.isNotBlank()) snackbarHostState.showSnackbar(error)
+        if (error.isNotBlank()) {
+            // 错误提示弹出前先清掉中性提示：两个 SnackbarHost 叠在同一点，
+            // 不互斥会视觉重叠
+            noticeHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(error)
+        }
     }
     // 中性/成功提示：与 error 分开走，避免「已更新地址」被显示成错误样式
     val notice by vm.notice.collectAsState()
     LaunchedEffect(notice) {
         if (notice.isNotBlank()) {
-            snackbarHostState.showSnackbar(
-                notice,
-                withDismissAction = true,
-            )
+            // 同上：中性提示弹出前清掉错误提示，避免重叠
+            snackbarHostState.currentSnackbarData?.dismiss()
+            noticeHostState.showSnackbar(notice)
             vm.consumeNotice()
         }
     }
@@ -224,10 +229,23 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
             )
         },
         snackbarHost = {
+            // ★ 错误提示（红色）
             SnackbarHost(snackbarHostState) { data ->
                 Snackbar(
                     containerColor = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                ) { Text(data.visuals.message) }
+            }
+            // ★ 中性/成功提示（深色）。必须与错误提示视觉可区分 —— 上一轮只把消息
+            // 从 _error 分流到 _notice，但渲染层仍统一用 errorContainer，
+            // 用户看到的还是红色错误样式，等于没修（QA 在 P1-4 抓到）。
+            // 两个独立 SnackbarHostState 是零风险方案：不用 SnackbarData.actionLabel
+            // 之类的内部标记，也不碰 SnackbarDuration（实验性 API）。
+            SnackbarHost(noticeHostState) { data ->
+                Snackbar(
+                    containerColor = MaterialTheme.colorScheme.inverseSurface,
+                    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                 ) { Text(data.visuals.message) }
             }

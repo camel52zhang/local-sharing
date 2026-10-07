@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -58,6 +59,9 @@ import com.localsharing.app.viewmodel.ShareViewModel
 @Composable
 fun HistoryScreen(vm: ShareViewModel, onBack: () -> Unit) {
     val history by vm.history.collectAsState()
+
+    // ★ 同DevicePickerScreen：接管系统返回键，否则历史页只认顶栏箭头
+    BackHandler { onBack() }
     val uploading by vm.uploading.collectAsState()
     var confirmClear by remember { mutableStateOf(false) }
 

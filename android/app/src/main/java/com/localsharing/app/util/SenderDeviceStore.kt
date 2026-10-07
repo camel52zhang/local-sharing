@@ -4,8 +4,6 @@ import android.content.Context
 import android.net.Uri
 import com.localsharing.app.model.SenderDevice
 import com.localsharing.app.model.SenderDeviceCodec
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import java.util.UUID
 
@@ -23,15 +21,6 @@ object SenderDeviceStore {
     private const val KEY_DEVICES = "sender_devices"
     private const val KEY_MIGRATED = "sender_devices_migrated"
 
-    /**
-     * 数据版本号：任何写操作自增，UI 订阅它做事件驱动刷新。
-     * （照抄 `ReceiverStore._revision`，替代 2s 轮询）
-     */
-    private val _revision = MutableStateFlow(0)
-
-    private fun bumpRevision() {
-        _revision.value += 1
-    }
 
     private fun prefs(context: Context) =
         context.getSharedPreferences("local_sharing_prefs", Context.MODE_PRIVATE)
@@ -115,7 +104,6 @@ object SenderDeviceStore {
         val arr = JSONArray()
         capped.forEach { arr.put(SenderDeviceCodec.toJson(it)) }
         prefs(context).edit().putString(KEY_DEVICES, arr.toString()).apply()
-        bumpRevision()
     }
 
     // ---- 老数据迁移 ----

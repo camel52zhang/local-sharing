@@ -2,8 +2,6 @@ package com.localsharing.app.util
 
 import android.content.Context
 import com.localsharing.app.model.TransferRecord
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import java.io.File
 
@@ -24,11 +22,7 @@ object TransferHistoryStore {
     /** 保留条数：与 `ReceiverStore.MAX_RECORDS = 200` 一致，不新造数字 */
     private const val MAX = 200
 
-    private val _revision = MutableStateFlow(0)
 
-    private fun bumpRevision() {
-        _revision.value += 1
-    }
 
     /** 读文件 + JSONArray 解析，**必须在 IO 线程调用**。损坏 JSON 返回空列表不崩溃 */
     fun load(context: Context): List<TransferRecord> {
@@ -61,6 +55,5 @@ object TransferHistoryStore {
         val arr = JSONArray()
         list.take(MAX).forEach { arr.put(it.toJson()) }
         File(context.filesDir, FILE).writeText(arr.toString())
-        bumpRevision()
     }
 }

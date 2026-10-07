@@ -799,6 +799,9 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         // 见下方 Running 分支）；若本函数先无条件写「已切回」，会把那个真实原因覆盖掉，
         // 用户看到成功提示但其实没切回。这是 QA 在 P1-3 里抓到的。
         viewModelScope.launch {
+            // ★ 快照必须在 selectDevice **之前**取。放在之后取的话，
+            // selectDevice 已把新文案写进去了，before == after 恒成立，判据永远失效。
+            val before = _error.value
             val device = _devices.value.firstOrNull { it.id == r.deviceId }
             if (device != null) {
                 selectDevice(device.id)
@@ -811,8 +814,16 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 reloadDevices()
                 selectDevice(added.id)
             }
-            // 只有在没被 selectDevice 写入错误提示时，才显示「已切回」
-            if (_error.value.isNullOrBlank()) {
+            // ★ 用「调用前后的值是否变化」判断，而不是「现在是否为空」。
+            //
+            // 上一版用 `_error.value.isNullOrBlank()` 是错的：_error 全局只有一个，
+            // 18 处写入但只有 2 处清空，残留上一次的失败文案是常态。
+            // 那样判据会永久为 false → 「已切回」提示被静默吞掉，用户零反馈，
+            // 且界面上还挂着上次的旧错误文案（DevicePickerScreen 会持续渲染它）。
+            //
+            // 正确判据：selectDevice 若因「发送中」被拒会写入新文案，值必然变化；
+            // 没变化说明它成功切了，这时才提示。
+            if (_error.value == before) {
                 _error.value = "已切回「${r.deviceLabel}」，请重新选择要发送的文件"
             }
         }
