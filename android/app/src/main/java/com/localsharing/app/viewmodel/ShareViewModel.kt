@@ -10,14 +10,18 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.localsharing.app.model.IncomingTransfer
 import com.localsharing.app.model.OutgoingItem
-import com.localsharing.app.model.PcInfo
 import com.localsharing.app.model.SavedFile
+import com.localsharing.app.model.SenderDevice
+import com.localsharing.app.model.SendOutcome
+import com.localsharing.app.model.TransferRecord
 import com.localsharing.app.network.ShareApi
 import com.localsharing.app.network.ShareWebSocket
 import com.localsharing.app.network.WsEvent
 import com.localsharing.app.util.MAX_ZIP_ENTRIES
 import com.localsharing.app.util.MAX_ZIP_TOTAL_BYTES
 import com.localsharing.app.util.Prefs
+import com.localsharing.app.util.SenderDeviceStore
+import com.localsharing.app.util.TransferHistoryStore
 import com.localsharing.app.util.extractZip
 import com.localsharing.app.util.getDisplayName
 import com.localsharing.app.util.getSize
@@ -26,12 +30,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
+import java.util.UUID
 
 sealed class ConnState {
     object Disconnected : ConnState()
@@ -40,18 +50,61 @@ sealed class ConnState {
     object Reconnecting : ConnState()
 }
 
+/**
+ * 同名设备去重确认的待决状态（PRD R3 / D2）。
+ *
+ * 两台同型号电视的 `/api/info.name` 完全相同，自动合并会丢设备、
+ * 不合并会重复 —— 唯一不失错的方案是问用户一句。
+ */
+data class PendingDup(
+    val host: String,
+    val port: Int,
+    val name: String,
+    val requiresCode: Boolean,
+    val existingId: String,
+)
+
 class ShareViewModel(app: Application) : AndroidViewModel(app) {
 
-    private val _connState = MutableStateFlow<ConnState>(ConnState.Disconnected)
-    val connState = _connState.asStateFlow()
+    // ============ L1 设备仓库（持久化，跨重启） ============
 
-    private val _pcInfo = MutableStateFlow(PcInfo())
-    val pcInfo = _pcInfo.asStateFlow()
+    private val _devices = MutableStateFlow<List<SenderDevice>>(emptyList())
+    val devices: StateFlow<List<SenderDevice>> = _devices.asStateFlow()
 
-    private val _baseUrl = MutableStateFlow("")
-    private val _deviceId = MutableStateFlow("")
-    private val _token = MutableStateFlow("")
-    private val _wsUrl = MutableStateFlow("")
+    // ============ L2 运行时会话（每设备一份，只有 active 那份活着） ============
+
+    private val _sessions = MutableStateFlow<Map<String, DeviceSession>>(emptyMap())
+    private val _activeDeviceId = MutableStateFlow<String?>(null)
+
+    /**
+     * ★ 竞态防护（设计文档 §6.1 R1，本方案最容易漏的一处）。
+     *
+     * 切设备时旧 socket 的 `onClosed`/`onFailure` 往往在新连接建立之后才回调，
+     * 此时若直接处理就会用**新** baseUrl 触发重连，状态彻底错乱。
+     * `connectWs()` 时自增并作为回调参数传入，所有 WsEvent 分支首行校验 `gen == connGen`。
+     */
+    private val connGen = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 每设备各自的重连 Job（切设备时 cancel 掉旧的，防重连风暴/ 跨设备重连） */
+    private val reconnectJobs = mutableMapOf<String, kotlinx.coroutines.Job>()
+
+    /** 当前活动目标的会话；UI 唯一需要订阅的连接态。非active 设备的会话留在 map 里，切回去时 token 还在 */
+    val activeSession: StateFlow<DeviceSession?> =
+        combine(_sessions, _activeDeviceId) { s, id -> id?.let { s[it] } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /** 当前目标设备条目；HomeScreen 顶部文案与发送按钮用它 */
+    val activeDevice: StateFlow<SenderDevice?> =
+        combine(_devices, _activeDeviceId) { d, id -> id?.let { i -> d.firstOrNull { it.id == i } } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
+     * active 设备的连接态。**语义与原 `connState` 完全一致（4 态）**，
+     * 所以 MainActivity/HomeScreen/ConnectScreen 的 if 分支零改动。
+     */
+    val connState: StateFlow<ConnState> = activeSession
+        .map { it?.state ?: ConnState.Disconnected }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, ConnState.Disconnected)
 
     private val _error = MutableStateFlow("")
     val error = _error.asStateFlow()
@@ -63,11 +116,30 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
     private val _pendingShare = MutableStateFlow<List<OutgoingItem>>(emptyList())
     val pendingShare = _pendingShare.asStateFlow()
 
-    private val _uploading = MutableStateFlow(false)
-    val uploading = _uploading.asStateFlow()
+    // ============ L3 单次发送状态（同一时刻只允许一个） ============
 
-    private val _uploadProgress = MutableStateFlow(0f)
-    val uploadProgress = _uploadProgress.asStateFlow()
+    private val _sendState = MutableStateFlow<SendState>(SendState.Idle)
+    val sendState: StateFlow<SendState> = _sendState.asStateFlow()
+
+    /** 由 SendState 派生，语义与原字段一致，UI 零改动 */
+    val uploading: StateFlow<Boolean> = _sendState
+        .map { it is SendState.Running }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val uploadProgress: StateFlow<Float> = _sendState
+        .map { (it as? SendState.Running)?.progress ?: 0f }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0f)
+
+    /** 正在发送的目标标签（冻结快照）；非上传态为 null。UI 可据此显示「正在发给谁」 */
+    val sendingTargetLabel: StateFlow<String?> = _sendState
+        .map { (it as? SendState.Running)?.target?.label }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // ============ 同名设备去重确认 ============
+
+    /** 非 null 时 UI 应弹确认框：已存在同名设备，是否更新它的地址？ */
+    private val _pendingDup = MutableStateFlow<PendingDup?>(null)
+    val pendingDup: StateFlow<PendingDup?> = _pendingDup.asStateFlow()
 
     private val _incoming = MutableStateFlow<List<IncomingTransfer>>(emptyList())
     val incoming = _incoming.asStateFlow()
@@ -86,76 +158,307 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
     private val _saveDirName = MutableStateFlow(Prefs.getSaveTreeName(app) ?: "")
     val saveDirName = _saveDirName.asStateFlow()
 
-    private var ws: ShareWebSocket? = null
-    private var manualDisconnect = false
-    private var reconnecting = false
+    /**
+     * 传输历史（只记终态，进程被杀重启后仍在：落 filesDir/sender_history.json）。
+     *
+     * 声明位置在init 之前 —— 见下方 init 块里的注释。
+     */
+    private val _history = MutableStateFlow<List<TransferRecord>>(emptyList())
+    val history: StateFlow<List<TransferRecord>> = _history.asStateFlow()
 
-    /** 稳定的设备身份（持久化于 SharedPreferences），用于桌面端复用同一设备条目 */
+    // WS 连接恒为单例（PRD D3）：只有 active 目标持一条连接。
+    // 多目标各持一条会让电视端（NanoWSD 每 20s ping、liveSockets 无界）连接数翻倍，
+    // 而收益仅是一个「在线」小圆点。
+    private var ws: ShareWebSocket? = null
+    private var wsDeviceId: String? = null
+
+    /** 手机的稳定身份（持久化于 SharedPreferences），用于接收端复用同一设备条目。
+     *  ⚠️ 与 `SenderDevice.id` 是**不同概念**：这个是「这台手机是谁」，
+     *  那个是「我要发给哪台设备」。勿混。*/
     private val clientId = Prefs.getDeviceUuid(getApplication())
 
-    /** 通过 IP + 端口连接 */
-    fun connect(ip: String, port: String, code: String, deviceName: String, deviceType: String) {
-        val base = ShareApi.normalizeBaseUrl("$ip:$port") ?: run {
-            _error.value = "无效的地址"
-            return
+    private val appCtx: Application get() = getApplication()
+
+    init {
+        // 老数据迁移：把旧版单条连接记录合成一条设备条目，保证老用户无感
+        SenderDeviceStore.migrateLegacyIfNeeded(appCtx)
+        reloadDevices()
+        // 恢复上次的目标：静默尝试，失败也不打扰用户（设备可能已关机）
+        val last = _devices.value.firstOrNull()
+        if (last != null) connectDevice(last.id, restoreOnly = true)
+        // 传输历史是常写流水（读文件 + JSONArray 解析），必须在 IO 线程
+        viewModelScope.launch(Dispatchers.IO) {
+            _history.value = TransferHistoryStore.load(appCtx)
         }
-        manualDisconnect = false
-        reconnecting = false
-        _baseUrl.value = base
-        _connState.value = ConnState.Connecting
+    }
+
+    private fun reloadDevices() {
+        _devices.value = SenderDeviceStore.loadDevices(appCtx)
+    }
+
+    // ============ 设备入库与连接 ============
+
+    /**
+     * probe + register + 写入设备仓库 + 建立会话。
+     *
+     * @param restoreOnly 启动恢复上次目标时为 true：失败只静默记录，不弹错误打扰用户
+     * @param code 共享码；为空则回退用设备已存的 shareCode
+     */
+    private fun connectDevice(deviceId: String, code: String? = null, restoreOnly: Boolean = false) {
+        val device = _devices.value.firstOrNull { it.id == deviceId } ?: return
+        val shareCode = code?.takeIf { it.isNotBlank() } ?: device.shareCode
+        val base = device.baseUrl
+        val gen = connGen.incrementAndGet()
+
+        _activeDeviceId.value = deviceId
+        updateSession(deviceId) { DeviceSession(deviceId, base, "", "", "", ConnState.Connecting) }
+
         viewModelScope.launch {
             try {
                 val info = ShareApi.getInfo(base)
-                _pcInfo.value = info
-                if (info.requiresCode && code.isEmpty()) {
-                    _error.value = "该电脑要求输入共享码"
-                    _connState.value = ConnState.Disconnected
+                if (info.requiresCode && shareCode.isNullOrEmpty()) {
+                    fail(deviceId, "该设备要求输入共享码", restoreOnly)
                     return@launch
                 }
-                val reg = ShareApi.register(base, deviceName.ifEmpty { Build.MODEL }, deviceType, code.ifEmpty { null }, clientId = clientId)
+                val reg = ShareApi.register(
+                    base, Build.MODEL.ifEmpty { "phone" }, "phone",
+                    shareCode?.takeIf { it.isNotEmpty() }, clientId = clientId,
+                )
                 if (reg.deviceId.isEmpty()) {
-                    _error.value = "注册设备失败"
-                    _connState.value = ConnState.Disconnected
+                    fail(deviceId, "注册设备失败", restoreOnly)
                     return@launch
                 }
-                _deviceId.value = reg.deviceId
-                _token.value = reg.token
-                _wsUrl.value = reg.wsUrl.ifEmpty { "${base.replace("http", "ws")}/ws?token=${reg.token}" }
-                Prefs.saveLastConnection(getApplication(), base, info.name)
-                connectWs()
-                _connState.value = ConnState.Connected
+                val wsUrl = reg.wsUrl.ifEmpty { "${base.replace("http", "ws")}/ws?token=${reg.token}" }
+
+                // 落库：刷新 name / requiresCode / lastOkAt。主机地址可能被改过，
+                // 以本次实际连通的 baseUrl 为准（端口顺延后重扫要能纠正条目）
+                val stored = SenderDeviceStore.upsertDevice(
+                    appCtx,
+                    device.copy(
+                        name = info.name.ifBlank { device.name },
+                        host = base.substringAfter("://").substringBefore(":"),
+                        port = base.substringAfterLast(":").toIntOrNull() ?: device.port,
+                        requiresCode = info.requiresCode,
+                        shareCode = shareCode?.takeIf { it.isNotEmpty() } ?: device.shareCode,
+                        lastOkAt = System.currentTimeMillis(),
+                    ),
+                    protectId = deviceId,
+                )
+                reloadDevices()
+                Prefs.saveLastConnection(appCtx, base, stored.name)
+
+                updateSession(deviceId) {
+                    DeviceSession(deviceId, base, reg.deviceId, reg.token, wsUrl, ConnState.Connected)
+                }
+                connectWs(deviceId, wsUrl, gen)
             } catch (e: Exception) {
-                _error.value = e.message ?: "连接失败"
-                _connState.value = ConnState.Disconnected
+                fail(deviceId, e.message ?: "连接失败", restoreOnly)
             }
         }
     }
 
-    /** 通过扫码得到的 URL 连接 */
-    fun connectFromUrl(url: String) {
+    private fun fail(deviceId: String, msg: String, quiet: Boolean) {
+        updateSession(deviceId) { it?.copy(state = ConnState.Disconnected, lastError = msg) }
+        if (!quiet) _error.value = msg
+    }
+
+    /**
+     * probe 后决定如何入库。
+     *
+     * 去重规则（设计文档 §6.5，设计阶段补充 R3 之外的场景）：
+     * ① `host:port` 完全相同 → **静默更新**该条目。
+     *    「扫同一台电视两次」是最高频操作，弹窗确认纯属骚扰；端口顺延后重扫也要能纠错。
+     * ② `host:port` 不同但 `name` 相同 → 需用户确认（同型号两台电视，不能静默合并，
+     *    合并会丢设备，不合并会重复，唯一不失错的方案是问一句）。
+     * ③ 其余 → 新增。
+     */
+    fun addDeviceByUrl(url: String) {
         val base = ShareApi.normalizeBaseUrl(url) ?: run {
             _error.value = "无效的二维码内容"
             return
         }
-        // base 形如 scheme://host:port（normalizeBaseUrl 已剥离 path/query），
         // 用 Uri 稳健解析，兼容 http(s):// 与 ws(s):// 以及带路径/查询参数的二维码内容
         val uri = android.net.Uri.parse(base)
-        val ip = uri.host
-        if (ip.isNullOrBlank()) {
+        val host = uri.host
+        if (host.isNullOrBlank()) {
             _error.value = "无效的二维码内容"
             return
         }
-        // 二维码未携带端口时回退到默认端口 38080（与电视端 ReceiverService.PORT_RANGE_START 一致；
-        // 电视端实际端口可能顺延到 38081~38085，那时二维码里会带真实端口）
-        val port = if (uri.port != -1) uri.port.toString() else "38080"
-        connect(ip, port, "", Build.MODEL, "phone")
+        // 二维码未携带端口时回退到默认端口 38080（与电视端 ReceiverService.PORT_RANGE_START 一致）
+        val port = if (uri.port != -1) uri.port else 38080
+
+        viewModelScope.launch {
+            val probe = runCatching { ShareApi.getInfo(base) }.getOrNull()
+            if (probe == null) {
+                _error.value = "无法连接该设备，请检查地址是否可达"
+                return@launch
+            }
+            val sameKey = SenderDeviceStore.findByKey(appCtx, "$host:$port")
+            if (sameKey != null) {
+                // ① 静默更新（不弹窗）
+                SenderDeviceStore.upsertDevice(
+                    appCtx,
+                    sameKey.copy(
+                        name = probe.name.ifBlank { sameKey.name },
+                        requiresCode = probe.requiresCode,
+                    ),
+                    protectId = sameKey.id,
+                )
+                reloadDevices()
+                selectDevice(sameKey.id)
+                _error.value = "已更新「${probe.name.ifBlank { sameKey.name }}」的地址"
+                return@launch
+            }
+            val sameName = SenderDeviceStore.findByName(appCtx, probe.name)
+            if (sameName != null) {
+                // ② 同名不同地址：交给 UI 弹确认，暂不入库
+                _pendingDup.value = PendingDup(
+                    host = host, port = port,
+                    name = probe.name.ifBlank { "未知设备" },
+                    requiresCode = probe.requiresCode,
+                    existingId = sameName.id,
+                )
+                return@launch
+            }
+            // ③ 新增
+            val added = SenderDeviceStore.upsertDevice(
+                appCtx,
+                SenderDevice(
+                    id = "", name = probe.name.ifBlank { "未知设备" },
+                    host = host, port = port, requiresCode = probe.requiresCode,
+                ),
+            )
+            reloadDevices()
+            selectDevice(added.id)
+        }
     }
 
-    private fun connectWs() {
-        ws = ShareWebSocket(_wsUrl.value) { onWsEvent(it) }.apply { connect() }
+    /** 手动输入 IP + 端口 + 共享码后入库（PRD R4，局域网里这是唯一的救命通道） */
+    fun addDeviceManually(host: String, port: String, code: String) {
+        val base = ShareApi.normalizeBaseUrl("$host:$port") ?: run {
+            _error.value = "无效的地址"
+            return
+        }
+        val h = base.substringAfter("://").substringBefore(":")
+        val p = base.substringAfterLast(":").toIntOrNull() ?: 0
+        val cleanCode = code.trim().takeIf { it.isNotEmpty() }
+
+        viewModelScope.launch {
+            val probe = runCatching { ShareApi.getInfo(base) }.getOrNull()
+            if (probe == null) {
+                _error.value = "无法连接该设备，请检查 IP 与端口"
+                return@launch
+            }
+            val existing = SenderDeviceStore.findByKey(appCtx, "$h:$p")
+            val added = SenderDeviceStore.upsertDevice(
+                appCtx,
+                (existing ?: SenderDevice(id = "", name = "", host = h, port = p)).copy(
+                    name = probe.name.ifBlank { existing?.name ?: "未知设备" },
+                    requiresCode = probe.requiresCode,
+                    shareCode = cleanCode ?: existing?.shareCode,
+                ),
+            )
+            reloadDevices()
+            selectDevice(added.id)
+        }
     }
 
-    private fun onWsEvent(ev: WsEvent) {
+    /** 确认「已存在同名设备，是否更新它的地址」 */
+    fun resolveDuplicate(updateExisting: Boolean) {
+        val dup = _pendingDup.value ?: return
+        _pendingDup.value = null
+        if (updateExisting) {
+            val existing = SenderDeviceStore.getDevice(appCtx, dup.existingId)
+            if (existing != null) {
+                val added = SenderDeviceStore.upsertDevice(
+                    appCtx,
+                    existing.copy(
+                        host = dup.host, port = dup.port,
+                        name = dup.name, requiresCode = dup.requiresCode,
+                    ),
+                    protectId = existing.id,
+                )
+                reloadDevices()
+                selectDevice(added.id)
+            }
+        } else {
+            val added = SenderDeviceStore.upsertDevice(
+                appCtx,
+                SenderDevice(
+                    id = "", name = dup.name, host = dup.host, port = dup.port,
+                    requiresCode = dup.requiresCode,
+                ),
+            )
+            reloadDevices()
+            selectDevice(added.id)
+        }
+    }
+
+    fun dismissDuplicate() {
+        _pendingDup.value = null
+    }
+
+    /**
+     * 切换发送目标。
+     *
+     * ★ 三层保证的第 2 层（状态机）：上传中直接 return，不发事件也不改状态。
+     * 但请注意——**第1 层（[SendTarget] 冻结快照）才是正确性**，本方法只是体验。
+     */
+    fun selectDevice(deviceId: String) {
+        if (_sendState.value is SendState.Running) {
+            _error.value = "正在发送中，完成后再切换"
+            return
+        }
+        if (deviceId == _activeDeviceId.value) {
+            // 已经是当前目标：仍要确保会话活着（首屏恢复时可能还没连上）
+            if (activeSession.value?.state == null || activeSession.value?.token.isNullOrEmpty()) {
+                connectDevice(deviceId)
+            }
+            return
+        }
+        // 旧目标断连而非后台保活（PRD D4）：保活会让「收到的文件」跨设备混淆归属
+        leaveTarget()
+        val device = _devices.value.firstOrNull { it.id == deviceId } ?: return
+        connectDevice(device.id)
+    }
+
+    /**
+     * 离开当前目标（切设备用）。
+     *
+     * 与 [disconnectAll] 的关键区别：**不清 [selectedItems]**。
+     * 待发文件与目标无关（PRD G5）——切设备后已选文件必须仍在。
+     */
+    private fun leaveTarget() {
+        connGen.incrementAndGet() // 让在途的 WS 回调全部失效
+        val leaving = _activeDeviceId.value
+        if (leaving != null) {
+            reconnectJobs.remove(leaving)?.cancel()
+            updateSession(leaving) { null }
+        }
+        ws?.close()
+        ws = null
+        wsDeviceId = null
+        _incoming.value = emptyList()
+    }
+
+    /**
+     * 扫码得到的 URL（旧入口，等价于 addDeviceByUrl）。
+     * 保留是为了让 ScannerScreen 的调用点不必改语义。
+     */
+    fun connectFromUrl(url: String) = addDeviceByUrl(url)
+
+    private fun connectWs(deviceId: String, wsUrl: String, gen: Int) {
+        ws?.close()
+        wsDeviceId = deviceId
+        ws = ShareWebSocket(wsUrl) { onWsEvent(deviceId, gen, it) }.apply { connect() }
+    }
+
+    private fun onWsEvent(deviceId: String, gen: Int, ev: WsEvent) {
+        // ★ 竞态防护 R1：过期回调必须在这里就被丢弃，
+        // 否则旧 socket 的 onClosed 会在新连接建立后触发一次指向错误 baseUrl 的重连
+        if (gen != connGen.get()) return
+        // 只有 active 设备的会话事件才处理
+        if (deviceId != _activeDeviceId.value) return
         when (ev) {
             is WsEvent.Open -> { /* 连接建立 */ }
             is WsEvent.Incoming -> {
@@ -165,51 +468,108 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
             }
             is WsEvent.Failure -> {
                 _error.value = ev.msg
-                maybeReconnect()
+                maybeReconnect(deviceId, gen)
             }
-            is WsEvent.Closed -> maybeReconnect()
+            is WsEvent.Closed -> maybeReconnect(deviceId, gen)
         }
     }
 
-    /** WS 断开后，非用户主动断开则指数退避重连 */
-    private fun maybeReconnect() {
-        if (manualDisconnect || reconnecting) return
-        if (_connState.value == ConnState.Disconnected) return
-        reconnecting = true
-        _connState.value = ConnState.Reconnecting
-        viewModelScope.launch {
+    /**
+     * WS 断开后指数退避重连（仅作用于当前目标，PRD D3/§3.2）。
+     *
+     * 退避公式 `(1000L * (1 shl attempt.coerceAtMost(5))).coerceAtMost(30_000L)` 原样保留，已验证可用。
+     * 每台设备的 attempt 计数存在各自的 Job 里，切设备不共享。
+     */
+    private fun maybeReconnect(deviceId: String, gen: Int) {
+        if (deviceId != _activeDeviceId.value) return
+        if (gen != connGen.get()) return
+        if (reconnectJobs[deviceId]?.isActive == true) return // 已在重连中，不重复起
+        updateSession(deviceId) { it?.copy(state = ConnState.Reconnecting) }
+
+        val job = viewModelScope.launch {
             var attempt = 0
-            while (!manualDisconnect) {
+            while (gen == connGen.get() && deviceId == _activeDeviceId.value) {
                 val delayMs = (1000L * (1 shl attempt.coerceAtMost(5))).coerceAtMost(30_000L)
                 attempt++
                 delay(delayMs)
-                if (manualDisconnect) break
+                if (gen != connGen.get() || deviceId != _activeDeviceId.value) break
                 try {
-                    val info = ShareApi.getInfo(_baseUrl.value)
-                    val reg = ShareApi.register(_baseUrl.value, Build.MODEL, "phone", null, clientId = clientId)
+                    // ★ 修既有 bug：原来这里传 code = null，而桌面端 app.ts 在 shareCode 非空时
+                    // 会校验 req.body.code —— 带共享码的电脑重连**必然 403**，永久卡在 Reconnecting。
+                    // 必须从 SenderDevice.shareCode 取码传入（每台设备各存各的）。
+                    val device = _devices.value.firstOrNull { it.id == deviceId } ?: break
+                    ShareApi.getInfo(device.baseUrl) // 探活
+                    val reg = ShareApi.register(
+                        device.baseUrl, Build.MODEL, "phone",
+                        device.shareCode?.takeIf { it.isNotEmpty() }, clientId = clientId,
+                    )
                     if (reg.deviceId.isEmpty()) continue
-                    _deviceId.value = reg.deviceId
-                    _token.value = reg.token
-                    _wsUrl.value = reg.wsUrl.ifEmpty { "${_baseUrl.value.replace("http", "ws")}/ws?token=${reg.token}" }
-                    connectWs()
-                    reconnecting = false
-                    _connState.value = ConnState.Connected
+                    val wsUrl = reg.wsUrl.ifEmpty { "${device.baseUrl.replace("http", "ws")}/ws?token=${reg.token}" }
+                    updateSession(deviceId) {
+                        it?.copy(
+                            remoteDeviceId = reg.deviceId, token = reg.token, wsUrl = wsUrl,
+                            state = ConnState.Connected,
+                        )
+                    }
+                    SenderDeviceStore.markReachable(appCtx, deviceId)
+                    reloadDevices()
+                    connectWs(deviceId, wsUrl, gen)
                     break
                 } catch (e: Exception) {
-                    // 继续重试
+                    // 继续重试；退避到30s 封顶。设备已关机时永远失败，
+                    // 但**保留设备条目**（电视临时关机会回来，不该删记录），且绝不自动切到别的设备
                 }
             }
+            reconnectJobs.remove(deviceId)
         }
+        reconnectJobs[deviceId] = job
     }
 
+    private fun updateSession(deviceId: String, block: (DeviceSession?) -> DeviceSession?) {
+        _sessions.update { m -> block(m[deviceId])?.let { m + (deviceId to it) } ?: m - deviceId }
+    }
+
+    /**
+     * 用户显式断开。
+     *
+     * 保留原有「全清」语义（含清空已选文件）—— 用户主动断开意味着放弃这次发送。
+     * 注意与 [leaveTarget] 区分：切设备绝不能清 `_selectedItems`（PRD G5）。
+     */
     fun disconnect() {
-        manualDisconnect = true
-        reconnecting = false
+        reconnectJobs.values.forEach { it.cancel() }
+        reconnectJobs.clear()
+        connGen.incrementAndGet()
         ws?.close()
         ws = null
-        _connState.value = ConnState.Disconnected
+        wsDeviceId = null
+        _activeDeviceId.value = null
+        _sessions.value = emptyMap()
         _incoming.value = emptyList()
         _selectedItems.value = emptyList()
+    }
+
+    // ============ 设备管理 ============
+
+    /** 重命名；alias 空串表示清除别名（回退显示真实 name） */
+    fun renameDevice(id: String, alias: String?) {
+        SenderDeviceStore.updateAlias(appCtx, id, alias?.trim()?.takeIf { it.isNotEmpty() }, protectId = id)
+        reloadDevices()
+    }
+
+    /** 移除设备。上传中拒绝；当前目标拒绝（否则用户会停在无目标的悬空态） */
+    fun removeDevice(id: String) {
+        if (_sendState.value is SendState.Running) {
+            _error.value = "正在发送中，完成后再删除设备"
+            return
+        }
+        if (id == _activeDeviceId.value) {
+            _error.value = "请先切换到其他设备再删除"
+            return
+        }
+        reconnectJobs.remove(id)?.cancel()
+        _sessions.update { it - id }
+        SenderDeviceStore.removeDevice(appCtx, id)
+        reloadDevices()
     }
 
     fun setAutoSave(on: Boolean) {
@@ -257,27 +617,55 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         _selectedItems.update { it.filterIndexed { i, _ -> i != index } }
     }
 
-    /** 发送已选项到电脑 */
+    /** 发送已选项到当前目标设备 */
     fun sendSelected() {
         val items = _selectedItems.value
-        if (items.isEmpty() || _connState.value != ConnState.Connected) return
+        // 守卫：只允许一个发送任务。正在发送时重复点击直接忽略
+        if (items.isEmpty() || _sendState.value is SendState.Running) return
+        val device = _devices.value.firstOrNull { it.id == _activeDeviceId.value } ?: return
+        val session = _sessions.value[device.id] ?: return
+        if (session.state != ConnState.Connected) return
+
+        // ★★★ 冻结目标快照（正确性保证，设计文档 §1.4）★★★
+        // 从这一行起，上传协程只读 target 这个不可变对象，**不再回读任何 StateFlow**。
+        // 「上传中切设备」只改 _activeDeviceId，物理上碰不到 target —— 文件绝不会发到别的设备。
+        val target = SendTarget.of(device, session) ?: return
         val asFolder = items.any { it.isFolder }
-        _uploading.value = true
-        _uploadProgress.value = 0f
+        val startedAt = System.currentTimeMillis()
+        val localNames = items.map { it.displayName }
+        val localTotal = items.sumOf { if (it.size > 0) it.size else 0L }
+            .let { sum -> if (items.any { it.size <= 0 }) -1L else sum }
+
+        _sendState.value = SendState.Running(target, startedAt, localTotal, 0L)
+
         viewModelScope.launch {
-            val res = ShareApi.uploadFiles(
-                getApplication(),
-                _baseUrl.value,
-                _token.value,
-                _deviceId.value,
-                items,
-                asFolder,
-            ) { sent, total ->
-                // total < 0 = 总量未知（SAF provider 不提供 SIZE 列），用 -1f 表达，
-                // UI 据此切到不确定态；写 0f 会让进度永远停在 0%
-                _uploadProgress.value = if (total > 0) sent.toFloat() / total else -1f
+            var res: ShareApi.UploadResult
+            try {
+                res = ShareApi.uploadFiles(
+                    appCtx,
+                    target.baseUrl,      // ← 只读冻结快照
+                    target.token,        // ← 不读 _sessions，绝不会串到别的设备的 token
+                    target.remoteDeviceId,
+                    items,
+                    asFolder,
+                ) { sent, total ->
+                    val st = _sendState.value
+                    if (st is SendState.Running && st.target.deviceId == target.deviceId) {
+                        // total < 0 = 总量未知（SAF provider 不提供 SIZE 列），
+                        // 此时保留启动时算出的本地总量，不要用 -1 覆盖掉已知值
+                        _sendState.value = st.copy(
+                            sentBytes = sent,
+                            totalBytes = if (total > 0) total else st.totalBytes,
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                // 网络异常也要落到终态并写历史，否则会留下永久卡在 Running 的死状态
+                res = ShareApi.UploadResult(false, "${e.javaClass.simpleName}: ${e.message}")
             }
-            _uploading.value = false
+            val finishedAt = System.currentTimeMillis()
+            _sendState.value = SendState.Idle
+
             if (res.ok) {
                 _selectedItems.value = emptyList()
                 _error.value = ""
@@ -286,7 +674,118 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 // 只写「请检查连接」无法区分鉴权失败、解析异常与连接中断
                 _error.value = "发送失败：${res.detail.ifBlank { "未知错误" }}"
             }
+            writeHistory(target, items.size, localNames, res, startedAt, finishedAt, localTotal)
         }
+    }
+
+    /**
+     * 写一条传输历史（**只在终态写**，进行中不落盘）。
+     *
+     * 回执降级策略（设计文档 §3.4）：
+     * - `count` 缺失 → 用请求文件数兜底记SUCCESS，并在 detail 注明「接收端未回报数量」
+     * - `files[]` 缺失 → 用手机端本地文件名兜底
+     * - `receivedCount < requestedCount` → 记 **PARTIAL**，不谎报 SUCCESS
+     *   （这是回执带来的**真实**部分成功判据，不是假进度）
+     */
+    private fun writeHistory(
+        target: SendTarget,
+        requested: Int,
+        localNames: List<String>,
+        res: com.localsharing.app.network.ShareApi.UploadResult,
+        startedAt: Long,
+        finishedAt: Long,
+        totalBytes: Long,
+    ) {
+        val receipt = res.receipt
+        val received = receipt.count
+        val outcome = when {
+            !res.ok -> SendOutcome.FAILED
+            received != null && received < requested -> SendOutcome.PARTIAL
+            else -> SendOutcome.SUCCESS
+        }
+        val detail = buildString {
+            if (!res.ok) append(res.detail.ifBlank { "未知错误" })
+            if (received == null) {
+                if (isNotEmpty()) append("；")
+                append("接收端未回报数量")
+            }
+            if (receipt.files.isEmpty()) {
+                if (isNotEmpty()) append("；")
+                append("文件名来自本机（接收端未回报落盘名）")
+            }
+        }
+        val record = TransferRecord(
+            id = java.util.UUID.randomUUID().toString(),
+            deviceId = target.deviceId,
+            deviceLabel = target.label,
+            targetHost = target.host,
+            targetPort = target.port,
+            // 优先用接收端回报的真实落盘名（含 MediaStore 同名改名）
+            fileNames = receipt.files.map { it.name }.ifEmpty { localNames },
+            totalBytes = totalBytes,
+            requestedCount = requested,
+            receivedCount = received,
+            outcome = outcome,
+            startedAt = startedAt,
+            finishedAt = finishedAt,
+            durationMs = finishedAt - startedAt,
+            httpCode = res.httpCode,
+            receiverTransferId = receipt.transferId,
+            detail = detail,
+        )
+        // 写文件必须在 IO 线程（TransferHistoryStore 读+写整个 JSON 文件）
+        viewModelScope.launch(Dispatchers.IO) { TransferHistoryStore.append(appCtx, record) }
+    }
+
+    // ============ 传输历史 ============
+    // ⚠️ 声明必须放在 init 之前：Kotlin 按声明顺序初始化属性，
+    // init 块里读_history 会报「Unresolved reference」。
+
+    fun reloadHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _history.value = TransferHistoryStore.load(appCtx)
+        }
+    }
+
+    fun clearHistory() {
+        viewModelScope.launch(Dispatchers.IO) {
+            TransferHistoryStore.clear(appCtx)
+            _history.value = emptyList()
+        }
+    }
+
+    fun deleteHistory(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            TransferHistoryStore.delete(appCtx, id)
+            _history.value = TransferHistoryStore.load(appCtx)
+        }
+    }
+
+    /**
+     * 重发某条历史记录。
+     *
+     * ⚠️ 与设计文档 §4.4 的**有意出入**：文档设想「重新 probe host:port 后复用冻结的
+     * 文件名」即可重发。但文件名不等于文件内容 —— 历史刻意不存 Uri
+     * （分享 Uri 的临时授权早已失效），因此无法凭空重发字节。
+     * 这里诚实降级为：切回原目标并提示用户重新选择文件（这才是用户真正需要的动作）。
+     */
+    fun retryHistory(recordId: String) {
+        val r = _history.value.firstOrNull { it.id == recordId } ?: return
+        val device = _devices.value.firstOrNull { it.id == r.deviceId }
+        if (device != null) {
+            selectDevice(device.id)
+        } else {
+            // 设备条目已被删除：按历史快照的地址重新探一次并重建条目
+            viewModelScope.launch {
+                val added = SenderDeviceStore.upsertDevice(
+                    appCtx,
+                    SenderDevice(id = "", name = r.deviceLabel, host = r.targetHost, port = r.targetPort),
+                )
+                reloadDevices()
+                selectDevice(added.id)
+            }
+        }
+        _error.value = "已切回「${r.deviceLabel}」，请重新选择要发送的文件"
     }
 
     /** 保存电脑推送过来的文件（文件夹会自动解压） */
@@ -296,7 +795,9 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         val tmpFile = File(ctx.cacheDir, "incoming_${System.currentTimeMillis()}_${transfer.name}")
         _incoming.update { it.map { t -> if (t.id == transfer.id) t.copy(saving = true, progress = 0f) else t } }
         viewModelScope.launch {
-            val ok = ShareApi.downloadFile(_baseUrl.value, transfer.id, tmpFile, _token.value) { sent, total ->
+            // 下载用当前目标的会话凭据；跨设备时守卫确保不会用别处的 token
+            val s = _sessions.value[_activeDeviceId.value] ?: return@launch
+            val ok = ShareApi.downloadFile(s.baseUrl, transfer.id, tmpFile, s.token) { sent, total ->
                 val p = if (total > 0) sent.toFloat() / total else 0f
                 _incoming.update { list -> list.map { t -> if (t.id == transfer.id) t.copy(progress = p) else t } }
             }
@@ -575,7 +1076,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
      * 由 HomeScreen 在 conn == Connected 且 pending 非空时调用；此处再做一次 Connected 守卫以防竞态。
      */
     fun flushPendingToSelected() {
-        if (_connState.value != ConnState.Connected) return
+        if (connState.value != ConnState.Connected) return
         // 用 update 在 CAS 内原子完成「读取当前 + 置空」，规避并发 update 写入被非原子置空丢弃的竞态；
         // 复用已有的 kotlinx.coroutines.flow.update 扩展，无需新增 import。
         var pending: List<OutgoingItem> = emptyList()
