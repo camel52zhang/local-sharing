@@ -73,7 +73,6 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val activeDevice by vm.activeDevice.collectAsState()
-    val devices by vm.devices.collectAsState()
     val error by vm.error.collectAsState()
     val selected by vm.selectedItems.collectAsState()
     val uploading by vm.uploading.collectAsState()
@@ -92,6 +91,17 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
     val crashedLastRun = remember { CrashLogCollector.lastRunCrashed }
     LaunchedEffect(error) {
         if (error.isNotBlank()) snackbarHostState.showSnackbar(error)
+    }
+    // 中性/成功提示：与 error 分开走，避免「已更新地址」被显示成错误样式
+    val notice by vm.notice.collectAsState()
+    LaunchedEffect(notice) {
+        if (notice.isNotBlank()) {
+            snackbarHostState.showSnackbar(
+                notice,
+                withDismissAction = true,
+            )
+            vm.consumeNotice()
+        }
     }
 
     // 连接成功后，把系统分享暂存的项自动填入发送列表（pending 清空后不再重复加入）

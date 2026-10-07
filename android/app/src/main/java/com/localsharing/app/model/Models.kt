@@ -61,7 +61,13 @@ data class UploadReceipt(
     /** 真实落盘文件（name含 MediaStore 同名自动改名，如 photo (1).jpg） */
     val files: List<ReceiptFile> = emptyList(),
 ) {
-    /** 是否有任何可用的回执细节：全空说明是老版本接收端，调用方应走本地名兜底 */
+    /**
+     * 是否有任何可用的回执细节：**全空说明是老版本接收端**，调用方应走本地名兜底。
+     *
+     * 保留它的理由：这是「回执是否可信」的语义判断，UI 上判断「要不要显示
+     * ‘接收端未回报数量’这类降级说明」时直接用它比重复写 `count != null || files.isNotEmpty()`
+     * 更清楚。当前 `writeHistory` 直接判两个字段，属于等价但更啰嗦的写法。
+     */
     val hasDetail: Boolean get() = count != null || files.isNotEmpty()
 }
 

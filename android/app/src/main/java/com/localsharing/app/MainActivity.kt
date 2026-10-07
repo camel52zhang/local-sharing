@@ -18,6 +18,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -138,7 +139,6 @@ fun AppRoot(
     scanning: MutableState<Boolean>,
     onScanRequest: () -> Unit,
 ) {
-    val conn by vm.connState.collectAsState()
     val devices by vm.devices.collectAsState()
     val active by vm.activeDevice.collectAsState()
     // 切到设备列表/历史的局部导航状态。用 rememberSaveable 让返回键与旋转后不丢
@@ -179,11 +179,20 @@ fun AppRoot(
         )
 
         // 列表非空但当前无目标（如用户显式断开过）→ 回到设备列表重新选一台
-        else -> DevicePickerScreen(
-            vm = vm,
-            onScan = onScanRequest,
-            onBack = { showPicker = false },
-            onPicked = { showPicker = false },
-        )
+        else -> {
+            // 这个 else 分支里 showPicker 本来就是 false，原来的 onBack={showPicker=false}
+            // 是空操作 → 系统返回键完全无效，用户被困在这一页。
+            // 兜底：让返回键有真实退路 —— 选中列表第一台（等价于「取消断开」），
+            // 列表为空则回到扫码页。
+            val fallback = remember(devices) { devices.firstOrNull() }
+            DevicePickerScreen(
+                vm = vm,
+                onScan = onScanRequest,
+                onBack = {
+                    if (fallback != null) vm.selectDevice(fallback.id) else onScanRequest()
+                },
+                onPicked = { showPicker = false },
+            )
+        }
     }
 }

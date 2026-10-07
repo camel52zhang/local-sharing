@@ -3,7 +3,6 @@ package com.localsharing.app.util
 import android.content.Context
 import com.localsharing.app.model.TransferRecord
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import java.io.File
@@ -26,7 +25,6 @@ object TransferHistoryStore {
     private const val MAX = 200
 
     private val _revision = MutableStateFlow(0)
-    val revision: StateFlow<Int> = _revision.asStateFlow()
 
     private fun bumpRevision() {
         _revision.value += 1

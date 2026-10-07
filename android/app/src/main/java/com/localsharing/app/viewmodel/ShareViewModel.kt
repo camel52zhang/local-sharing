@@ -107,6 +107,14 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, ConnState.Disconnected)
 
     private val _error = MutableStateFlow("")
+    /** 中性/成功提示：与 _error 分开，避免成功信息被显示成错误样式 */
+    private val _notice = MutableStateFlow("")
+    val notice: StateFlow<String> = _notice.asStateFlow()
+
+    /** UI 消费完提示后调用，避免重组时重复弹出同一条 snackbar */
+    fun consumeNotice() {
+        _notice.value = ""
+    }
     val error = _error.asStateFlow()
 
     private val _selectedItems = MutableStateFlow<List<OutgoingItem>>(emptyList())
@@ -306,7 +314,7 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 reloadDevices()
                 selectDevice(sameKey.id)
-                _error.value = "已更新「${probe.name.ifBlank { sameKey.name }}」的地址"
+                _notice.value = "已更新「${probe.name.ifBlank { sameKey.name }}」的地址"
                 return@launch
             }
             val sameName = SenderDeviceStore.findByName(appCtx, probe.name)
@@ -736,8 +744,21 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
             detail = detail,
         )
         // 写文件必须在 IO 线程（TransferHistoryStore 读+写整个 JSON 文件）
-        viewModelScope.launch(Dispatchers.IO) { TransferHistoryStore.append(appCtx, record) }
+        // ★ append 后必须同步更新内存态。只写文件不更新 _history 会有两个问题：
+        //   1) 同一次会话内 _history 停留在旧数据，依赖「进页时重新 load」才能看到新记录；
+        //   2) writeHistory 与 reloadHistory 都在 Dispatchers.IO 上异步执行，
+        //      两者无顺序保证 —— reload 先于 append 完成时，历史页会少一条（窗口极小但真实）。
+        viewModelScope.launch(Dispatchers.IO) {
+            TransferHistoryStore.append(appCtx, record)
+            // 直接前置插入，不必重读整个文件（append 已做上限裁剪）
+            _history.update { prev ->
+                (listOf(record) + prev).take(HISTORY_MAX)
+            }
+        }
     }
+
+    /** 与 `TransferHistoryStore.MAX`(200) 保持一致 */
+    private val HISTORY_MAX = 200
 
     // ============ 传输历史 ============
     // ⚠️ 声明必须放在 init 之前：Kotlin 按声明顺序初始化属性，
@@ -773,12 +794,16 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun retryHistory(recordId: String) {
         val r = _history.value.firstOrNull { it.id == recordId } ?: return
-        val device = _devices.value.firstOrNull { it.id == r.deviceId }
-        if (device != null) {
-            selectDevice(device.id)
-        } else {
-            // 设备条目已被删除：按历史快照的地址重新探一次并重建条目
-            viewModelScope.launch {
+        // ★ 提示必须放在 selectDevice 之后，且在同一个协程内。
+        // 原因：selectDevice 内部会写 _error（如「正在发送中，完成后再切换」，
+        // 见下方 Running 分支）；若本函数先无条件写「已切回」，会把那个真实原因覆盖掉，
+        // 用户看到成功提示但其实没切回。这是 QA 在 P1-3 里抓到的。
+        viewModelScope.launch {
+            val device = _devices.value.firstOrNull { it.id == r.deviceId }
+            if (device != null) {
+                selectDevice(device.id)
+            } else {
+                // 设备条目已被删除：按历史快照的地址重建条目
                 val added = SenderDeviceStore.upsertDevice(
                     appCtx,
                     SenderDevice(id = "", name = r.deviceLabel, host = r.targetHost, port = r.targetPort),
@@ -786,8 +811,11 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                 reloadDevices()
                 selectDevice(added.id)
             }
+            // 只有在没被 selectDevice 写入错误提示时，才显示「已切回」
+            if (_error.value.isNullOrBlank()) {
+                _error.value = "已切回「${r.deviceLabel}」，请重新选择要发送的文件"
+            }
         }
-        _error.value = "已切回「${r.deviceLabel}」，请重新选择要发送的文件"
     }
 
     /** 保存电脑推送过来的文件（文件夹会自动解压） */

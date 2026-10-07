@@ -5,7 +5,6 @@ import android.net.Uri
 import com.localsharing.app.model.SenderDevice
 import com.localsharing.app.model.SenderDeviceCodec
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import java.util.UUID
@@ -29,7 +28,6 @@ object SenderDeviceStore {
      * （照抄 `ReceiverStore._revision`，替代 2s 轮询）
      */
     private val _revision = MutableStateFlow(0)
-    val revision: StateFlow<Int> = _revision.asStateFlow()
 
     private fun bumpRevision() {
         _revision.value += 1
@@ -78,7 +76,15 @@ object SenderDeviceStore {
         val entry = if (device.id.isBlank()) device.copy(id = UUID.randomUUID().toString()) else device
         val idx = list.indexOfFirst { it.id == entry.id }
         if (idx >= 0) list[idx] = entry else list.add(entry)
-        saveDevices(context, list, protectId)
+        // ★ 本次新增/更新的条目必须自动受保护，不依赖调用点记得传 protectId。
+        //
+        // 背景：列表满 MAX_DEVICES 时新增设备，若不保护，新设备的 lastOkAt=0
+        // （默认值，从未成功连通过）会在 LRU 排序里排最后 → **第一个被淘汰**。
+        // 结果：扫了码没反应、无任何提示（selectDevice 找不到设备静默 return），
+        // 属于静默数据丢失。实测复现：21 台输入时新设备必被淘汰。
+        //
+        // 这里传 `protectId ?: entry.id`，让「刚被用户选中的这条」一定留在列表里。
+        saveDevices(context, list, protectId ?: entry.id)
         return entry
     }
 

@@ -72,6 +72,11 @@ object SenderDeviceCodec {
      *
      * ⚠️ 必须 `sortedByDescending`（新的在前）再 `take`：升序+take 会把
      * **最久没连通的**留在列表里、淘汰掉刚连通过的 —— 与 LRU 意图正好相反。
+     *
+     * ⚠️ 注意 `lastOkAt == 0` 表示「从未成功连通过」，不等于「很久没连通」。
+     * 刚添加的设备 lastOkAt 就是 0，若不保护会被排到最后 → **第一个被淘汰**。
+     * 所以新增/更新的条目必须走 [SenderDeviceStore.upsertDevice] 的自动保护
+     * （它内部传 `protectId ?: entry.id`），否则用户扫码会「没反应且无提示」。
      */
     fun trimToLimit(list: List<SenderDevice>, limit: Int = MAX_DEVICES, protectId: String? = null): List<SenderDevice> {
         if (list.size <= limit) return list
