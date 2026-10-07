@@ -31,8 +31,26 @@ class ReceiverService : Service() {
         /** 与桌面端一致的默认端口；被占用时依次 +1 尝试 */
         const val BASE_PORT = 8080
 
+        private const val TAG = "ReceiverService"
+
         private val _status = MutableStateFlow(ReceiverStatus())
         val status: StateFlow<ReceiverStatus> = _status.asStateFlow()
+
+        /**
+         * 追加一条服务日志，同时进两处：
+         * ① 内存 StateFlow —— 电视 UI 的「服务日志」弹窗直接显示（[TvReceiverActivity] 里
+         *    `showLogs` 那个AlertDialog）。电视上没有 logcat 可看，用户截图就能反馈。
+         * ② logcat —— 便于 `adb logcat -s ReceiverService` 抓完整上下文。
+         *
+         * 放在 companion 里而不是实例方法上：[TvReceiverActivity] 的安装流程（不持有Service 实例，
+         * Service 可能已stop）也需要写同一份日志。
+         */
+        fun appendLog(line: String) {
+            val entry = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                .format(java.util.Date()) + " $line"
+            android.util.Log.i(TAG, line)
+            _status.value = _status.value.copy(log = (_status.value.log + entry).takeLast(100))
+        }
 
         fun start(context: Context) {
             val i = Intent(context, ReceiverService::class.java)
@@ -115,12 +133,6 @@ class ReceiverService : Service() {
         } else {
             appendLog("[server] 启动失败：所有候选端口均被占用")
         }
-    }
-
-    private fun appendLog(line: String) {
-        val entry = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
-            .format(java.util.Date()) + " $line"
-        _status.value = _status.value.copy(log = (_status.value.log + entry).takeLast(100))
     }
 
     /**

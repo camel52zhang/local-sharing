@@ -577,39 +577,289 @@ private fun formatSize(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
+/** 安装流程的 logcat tag，便于 `adb logcat -s TvInstall` 单独抓安装链路 */
+private const val INSTALL_TAG = "TvInstall"
+
+/** APK 的 MIME 类型 */
+private const val APK_MIME = "application/vnd.android.package-archive"
+
 /**
- * 一键安装 APK：
- * 1) 先申请「安装未知应用」授权（TCL/小米首次都会拦）
- * 2) 把 APK 从 Downloads 复制到 cacheDir/installs，经 FileProvider 交给系统安装器
+ * 安装流程日志：双通道输出。
+ * - [ReceiverService.appendLog] → 电视 UI 的「服务日志」弹窗。用户下次点安装卡住时，
+ *   截图那几行 `[install]` 就能定位到断在哪一步，不必连 adb（电视上通常也没有 adb 环境）。
+ * - [android.util.Log] → logcat，留给开发侧抓完整上下文。
  */
-private fun installApk(context: android.content.Context, item: ReceivedItem) {
-    // 授权检查
-    if (Build.VERSION.SDK_INT >= 26 &&
-        !context.packageManager.canRequestPackageInstalls()
-    ) {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-            Uri.parse("package://${context.packageName}"),
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
+private fun installLog(msg: String) {
+    android.util.Log.i(INSTALL_TAG, msg)
+    ReceiverService.appendLog("[install] $msg")
+}
+
+/**
+ * 拉起「安装未知应用」授权页，返回是否成功打开了页面。
+ *
+ * 为什么要试三种形式 —— AOSP 对 [Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES] 的 data URI
+ * 只说了「可选，要指定包名则形如 `package:com.my.app`」（单斜杠），但 ROM 侧解析代码分两派：
+ * - `getSchemeSpecificPart()` 派系：`package:com.x` → `com.x` ✅；`package://com.x` → `//com.x` ❌
+ * - `getAuthority()` 派系：`package://com.x` → `com.x` ✅；`package:com.x` → null ❌
+ * 即两种写法各覆盖约一半定制 ROM，都不能单独依赖。
+ * 而**不带 data** 的形式（跳到全局「未知来源应用」列表页）是官方明确允许的，
+ * 不受上述解析分歧影响，是唯一全覆盖的兜底。
+ *
+ * 返回 false 表示本机 ROM 根本没有这个 Activity（深度定制 TV ROM 常见），
+ * 调用方据此转入「手动安装」兜底，而不是让异常冒泡崩溃。
+ */
+private fun requestInstallPermission(context: android.content.Context): Boolean {
+    val pkg = context.packageName
+    val attempts = listOf(
+        "package:$pkg" to "package:单斜杠",
+        "package://$pkg" to "package:// 双斜杠",
+        null to "无 data（全局未知来源列表页）",
+    )
+    for ((dataUri, label) in attempts) {
+        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+            // 变量名不能叫 data：apply 作用域里 data 会解析到 Intent.setData()，不是外层的形参
+            if (dataUri != null) setData(Uri.parse(dataUri))
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(intent)
+            installLog("已拉起授权页：$label")
+            return true
+        } catch (e: android.content.ActivityNotFoundException) {
+            // 定制 ROM 可能没有这个 Activity，或不接受这种 data 形式
+            installLog("授权页 $label 不存在（ActivityNotFoundException）")
+        } catch (e: Exception) {
+            installLog("授权页 $label 拉起失败：${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+    installLog("本机没有可用的「安装未知应用」授权页")
+    return false
+}
+
+/** 判断 child 是否位于 dir 之下（用 canonicalPath 消解 `..` 与软链）；解析失败按「不在内」处理 */
+private fun isUnder(child: File, dir: File): Boolean = try {
+    val c = child.canonicalPath
+    val d = dir.canonicalPath
+    c != d && c.startsWith(d + File.separator)
+} catch (e: Exception) {
+    false
+}
+
+/**
+ * 安装失败时的最终兜底：把 APK 落到用户能用电视自带「文件管理 / 应用中心」找到的位置，
+ * 并**明确把真实绝对路径告诉用户**。
+ *
+ * 之前这条链路的所有失败分支要么静默 return、要么只 printStackTrace（电视上没人看得见堆栈），
+ * 用户视角就是「点安装没反应」。这里保证任何路径下都有反馈。
+ */
+private fun fallbackToManualInstall(
+    context: android.content.Context,
+    item: ReceivedItem,
+    source: File?,
+) {
+    if (source == null) {
+        installLog("兜底失败：源文件定位不到，无法提示路径")
+        Toast.makeText(
+            context,
+            "未在接收目录找到该文件，可能已被清理。请用手机重新发送一次再安装。",
+            Toast.LENGTH_LONG,
+        ).show()
         return
     }
-    try {
-        val installsDir = File(context.cacheDir, "installs").apply { mkdirs() }
-        val target = File(installsDir, item.name)
-        // 从 Downloads（MediaStore 或公共目录）把 APK 读出来复制到缓存
-        val copied = copyFromDownloads(context, item.name, target)
-        if (!copied) return
-        val uri = FileProvider.getUriForFile(
-            context, "${context.packageName}.fileprovider", target,
-        )
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
+
+    // 已经在公共 Downloads 下就不用搬了，直接报位置（电视文件管理能直接浏览到）
+    if (isUnder(source, publicDownloadDir())) {
+        installLog("兜底：文件已在公共下载目录，无需搬运：${source.absolutePath}")
+        Toast.makeText(
+            context,
+            "本机没有系统安装器，请用电视的「文件管理 / 应用中心」打开并安装。\nAPK 路径：${source.absolutePath}",
+            Toast.LENGTH_LONG,
+        ).show()
+        return
+    }
+
+    // 尝试搬进公共 Download（算法与 ReceiverServer.saveToDownloads 的 API 28- 分支同构）
+    val publicDir = publicDownloadDir()
+    val moved = runCatching {
+        val dir = File(publicDir, ReceiverStore.SAVE_ROOT)
+        if (!dir.exists() && !dir.mkdirs()) return@runCatching null
+        val dest = File(dir, item.name)
+        source.inputStream().use { input -> dest.outputStream().use { input.copyTo(it) } }
+        dest.takeIf { it.length() > 0L }
+    }.getOrNull()
+
+    if (moved != null) {
+        installLog("兜底：已复制到公共下载目录：${moved.absolutePath} (${moved.length()} B)")
+        Toast.makeText(
+            context,
+            "本机没有系统安装器，请用电视的「文件管理 / 应用中心」打开并安装。\nAPK 路径：${moved.absolutePath}",
+            Toast.LENGTH_LONG,
+        ).show()
+        return
+    }
+
+    // 公共目录不可写（API 24~28 上实测存在：进程拿不到 sdcard_rw 组）。
+    // 再退一步到应用私有外部目录：必定可写、且已在 file_paths.xml 的 external-files-path 内，
+    // 用户仍可用系统文件管理配合本应用「打开」功能处理。
+    val privCopy = runCatching {
+        val privBase = context.getExternalFilesDir(null) ?: return@runCatching null
+        val dir = File(privBase, ReceiverStore.SAVE_ROOT)
+        if (!dir.exists() && !dir.mkdirs()) return@runCatching null
+        val dest = File(dir, item.name)
+        source.inputStream().use { input -> dest.outputStream().use { input.copyTo(it) } }
+        dest.takeIf { it.length() > 0L }
+    }.getOrNull()
+
+    if (privCopy != null) {
+        installLog("兜底：公共目录不可写，已复制到应用私有目录：${privCopy.absolutePath}")
+        Toast.makeText(
+            context,
+            "系统安装器不可用且公共下载目录不可写。\n已放到应用目录，可用下方「打开」按钮查看：\n${privCopy.absolutePath}",
+            Toast.LENGTH_LONG,
+        ).show()
+        return
+    }
+
+    installLog("兜底失败：所有候选目录均不可写，保留原路径 ${source.absolutePath}")
+    Toast.makeText(
+        context,
+        "系统安装器不可用，且没有可写入的目录。\n文件仍在原处：${source.absolutePath}",
+        Toast.LENGTH_LONG,
+    ).show()
+}
+
+/**
+ * 公共 Downloads 根目录。
+ * `getExternalStoragePublicDirectory` 返回的目录未必真实存在（外置存储未挂载时），
+ * 调用方要用isUnder / mkdirs 处理这种情况，故返回原对象、不做校验。
+ */
+@Suppress("DEPRECATION") // 项目里 ReceiverServer/locateReceivedFile 都用同一 API，保持一致
+private fun publicDownloadDir(): File =
+    android.os.Environment
+        .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+
+/**
+ * 一键安装 APK。设计原则：**无论走哪条路径，用户都必须看到明确反馈，绝不静默失败，更不能崩溃。**
+ *
+ * 1) 先定位文件真实位置（后续所有失败提示都要靠它报路径）
+ * 2) API 26+ 申请「安装未知应用」授权；三种 URI 形式依次尝试，ROM 没有该页面则转手动兜底
+ * 3) 复制到 cacheDir/installs，经 FileProvider 交给系统安装器（ACTION_VIEW / ACTION_INSTALL_PACKAGE 都试）
+ * 4) 任一环节失败 → [fallbackToManualInstall]，把 APK 放到用户找得到的位置并报出路径
+ *
+ * 历史上这里是全项目唯一一处「日志与错误处理双缺」的地方：第 594 行的
+ * `startActivity` 裸奔（定制 TV ROM 上 `ACTION_MANAGE_UNKNOWN_APP_SOURCES` 不存在时抛
+ * `ActivityNotFoundException`，RuntimeException 直接冒泡导致 Activity 闪退），
+ * 末尾的 `e.printStackTrace()` 在电视上等于什么都没做。
+ */
+private fun installApk(context: android.content.Context, item: ReceivedItem) {
+    installLog("=== 开始安装 ${item.name} (${formatSize(item.size)}) sdk=${Build.VERSION.SDK_INT}")
+
+    // ---- 步骤 1：先定位文件。任何失败提示都要靠它报出真实路径，所以必须放在最前面 ----
+    val source = try {
+        locateReceivedFile(context, item.name)
     } catch (e: Exception) {
-        e.printStackTrace()
+        installLog("定位文件时异常：${e.javaClass.simpleName}: ${e.message}")
+        null
+    }
+    if (source == null) {
+        // 注意：locateReceivedFile 用的是「当前」的保存子目录，而接收记录里没存落盘时的目录。
+        // 用户如果接收后改了保存位置，这里就会去新目录找、找不到旧文件 —— 这是已知缺陷。
+        installLog("WARN 接收目录里找不到 ${item.name}（可能已被清理，或接收后改过保存位置）")
+    } else {
+        installLog("源文件：${source.absolutePath} (${source.length()} B)")
+    }
+
+    // ---- 步骤 2：安装未知应用授权（API 26 起）----
+    if (Build.VERSION.SDK_INT >= 26 && !context.packageManager.canRequestPackageInstalls()) {
+        if (requestInstallPermission(context)) {
+            Toast.makeText(
+                context,
+                "请在系统设置里允许本应用「安装未知应用」，然后返回再点一次安装。",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        installLog("未获授权且本机无授权页，转手动安装兜底")
+        fallbackToManualInstall(context, item, source)
+        return
+    }
+
+    // ---- 步骤 3：复制到 cacheDir/installs，经 FileProvider 交给系统安装器 ----
+    try {
+        val installsDir = File(context.cacheDir, "installs")
+        // mkdirs() 的返回值必须检查：它失败时文件确实写不进去，而后续
+        // FileProvider.getUriForFile 会抛 IllegalArgumentException("Failed to find configured root")，
+        // 报错完全指不到真正的原因。
+        if (!installsDir.exists() && !installsDir.mkdirs()) {
+            installLog("WARN 缓存安装目录创建失败：${installsDir.absolutePath}")
+        }
+        val target = File(installsDir, item.name)
+
+        val copied = copyFromDownloads(context, item.name, target)
+        if (!copied) {
+            installLog("复制失败：接收目录中已无 ${item.name}")
+            Toast.makeText(
+                context,
+                "文件已不在接收目录，可能已被清理。请用手机重新发送一次再安装。",
+                Toast.LENGTH_LONG,
+            ).show()
+            fallbackToManualInstall(context, item, source)
+            return
+        }
+        if (!target.exists() || target.length() == 0L) {
+            installLog("复制失败：目标不存在或长度为 0（${target.absolutePath}）")
+            Toast.makeText(
+                context,
+                "复制安装包失败（目标文件为空），请重新发送后再试。",
+                Toast.LENGTH_LONG,
+            ).show()
+            fallbackToManualInstall(context, item, source)
+            return
+        }
+        installLog("已复制到缓存：${target.absolutePath} (${target.length()} B)")
+
+        // getUriForFile 单独 try/catch：它抛的是 IllegalArgumentException，
+        // 与外层其它异常混在一起会掩盖「file_paths.xml 与实际路径不匹配」这类配置错误。
+        val uri = try {
+            FileProvider.getUriForFile(
+                context, "${context.packageName}.fileprovider", target,
+            )
+        } catch (e: IllegalArgumentException) {
+            installLog("FileProvider 生成 URI 失败：${e.message}")
+            fallbackToManualInstall(context, item, source)
+            return
+        }
+        installLog("content uri = $uri")
+
+        // 两种action 都试：厂商 ROM 的安装器可能只认其中一个
+        //（ACTION_INSTALL_PACKAGE 在 API 29 起被标记废弃，但定制 ROM 的安装器仍可能只认它，
+        //  所以这里的废弃是"有意使用"而非遗漏）
+        @Suppress("DEPRECATION")
+        for (action in listOf(Intent.ACTION_VIEW, Intent.ACTION_INSTALL_PACKAGE)) {
+            try {
+                val intent = Intent(action).apply {
+                    setDataAndType(uri, APK_MIME)
+                    addFlags(
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK,
+                    )
+                }
+                context.startActivity(intent)
+                installLog("已调起系统安装器：action=$action")
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                installLog("action=$action 无对应安装器（ActivityNotFoundException）")
+            } catch (e: Exception) {
+                installLog("action=$action 拉起失败：${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
+        installLog("两种安装 action 均失败，转手动安装兜底")
+        fallbackToManualInstall(context, item, source)
+    } catch (e: Exception) {
+        // 兜底中的最后一道：绝不让安装流程的任何异常冒泡到 Activity 造成闪退
+        installLog("安装流程异常：${e.javaClass.simpleName}: ${e.message}")
+        android.util.Log.e(INSTALL_TAG, "installApk crashed", e)
+        fallbackToManualInstall(context, item, source)
     }
 }
 
