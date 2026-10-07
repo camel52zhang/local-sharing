@@ -45,7 +45,11 @@ fun ConnectScreen(vm: ShareViewModel, onScan: () -> Unit) {
     val context = LocalContext.current
     val last = remember { Prefs.getLastConnection(context) }
     var ip by remember { mutableStateOf(last?.first?.removePrefix("http://")?.substringBefore(":") ?: "") }
-    var port by remember { mutableStateOf(last?.first?.substringAfterLast(":") ?: "8080") }
+    // 默认端口与电视端保持一致（ReceiverService.PORT_RANGE_START = 38080）。
+    // 电视端实际端口可能因占用而顺延，所以优先用上次连接成功的那个。
+    var port by remember {
+        mutableStateOf(last?.first?.substringAfterLast(":") ?: "38080")
+    }
     var code by remember { mutableStateOf("") }
     val conn by vm.connState.collectAsState()
     val error by vm.error.collectAsState()

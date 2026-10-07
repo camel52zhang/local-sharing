@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -52,7 +53,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.unit.sp
@@ -229,6 +234,9 @@ private fun ReceiverScreen(onStop: () -> Unit) {
     var showLogs by remember { mutableStateOf(false) }
     var lastSeenId by remember { mutableStateOf<String?>(null) }
 
+    // ★ D-pad 初始焦点：必须显式请求，否则启动后焦点无处可落，方向键无反应
+    val firstFocus = remember { FocusRequester() }
+
     // 事件驱动刷新：服务端每次写入（新文件/新设备）都会自增 revision，UI 订阅它按需重载；
     // 读盘放在 IO 线程，避免在电视这种弱 CPU 上每 2 秒阻塞主线程。
     val revision by ReceiverStore.revision.collectAsState()
@@ -266,7 +274,7 @@ private fun ReceiverScreen(onStop: () -> Unit) {
             ) {
                 Text("手机扫码，直传电视", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(16.dp))
-                // 无可用网卡时 lanIp 为空串，此时拼出的 "http://:8080" 是废二维码，
+                // 无可用网卡时 lanIp 为空串，此时拼出的 "http://:38080" 是废二维码，
                 // 手机扫码必然失败且电视端看不出异常，所以必须显式区分「没起来」和「没 IP」。
                 val hasUrl = status.running && status.lanIp.isNotBlank()
                 val url = if (hasUrl) "http://${status.lanIp}:${status.port}" else ""
@@ -288,7 +296,7 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                 )
                 Spacer(Modifier.height(14.dp))
                 Row {
-                    TvButton("保存位置", { showSettings = true })
+                    TvButton("保存位置", { showSettings = true }, focusRequester = firstFocus)
                     Spacer(Modifier.width(12.dp))
                     TvButton("日志", { showLogs = true })
                     Spacer(Modifier.width(12.dp))
@@ -651,8 +659,13 @@ private fun deleteRecordAndFile(context: android.content.Context, id: String, na
  * 未聚焦态为深灰描边 + 白字。三个信号叠加（底色/文字色/描边），
  * 保证在电视亮度下、隔着几米也能一眼看出焦点在哪。
  */
+private const val FOCUS_TAG = "TvFocus"
+
 private val FocusAmber = Color(0xFFFFB020)
-private val FocusIdleBorder = Color(0xFF3A4550)
+private val FocusIdleBorder = Color(0xFF39434E)
+
+/** 按钮圆角：与 Material3 Button 默认 shape 一致，避免内外圆角不匹配 */
+private val ButtonShape = RoundedCornerShape(14.dp)
 
 /**
  * 通用焦点高亮按钮：Material Button 在深色背景上焦点态不可辨，这里统一替换。
@@ -665,8 +678,21 @@ private fun TvButton(
     modifier: Modifier = Modifier,
     primary: Boolean = false,
     danger: Boolean = false,
+    /** 首个按钮传FocusRequester(requestFocus)，解决「启动后焦点无处可落」 */
+    focusRequester: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // ★ 电视关键：Compose 不会自动把焦点交给第一个 focusable 组件。
+    // 不显式 requestFocus 的话，启动后焦点无处可落，**D-pad 方向键完全无反应**
+    //（返回键仍可用，因为它被系统直接拦截，不经过焦点系统）。
+    // 这就是「按了没反应」的根因。
+    LaunchedEffect(Unit) {
+        focusRequester?.let {
+            // 延后一帧，等 Compose 完成首轮布局后再要焦点
+            kotlinx.coroutines.delay(120)
+            runCatching { it.requestFocus() }
+        }
+    }
     val bg by animateColorAsState(
         if (focused) FocusAmber else if (primary) Color(0xFF1F6FEB) else Color(0xFF232C34),
         label = "tvBtnBg",
@@ -683,21 +709,36 @@ private fun TvButton(
     Button(
         onClick = onClick,
         modifier = modifier
-            .border(
-                width = if (focused) 3.dp else 1.dp,
-                color = if (focused) FocusAmber else FocusIdleBorder,
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+            // 只在未聚焦时给一圈极淡的描边；聚焦态靠实心底色 + 缩放表达，
+            // 不再用硬边框——之前 3dp 直角描边套在 Material 圆角按钮上，
+            // 内外圆角不一致，看起来像「方框套方框」，很廉价。
+            .then(
+                if (focused) Modifier
+                    .scale(1.06f)
+                else Modifier.border(
+                    width = 1.dp,
+                    color = FocusIdleBorder,
+                    shape = ButtonShape,
+                ),
             )
+            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .focusable()
-            .onFocusChanged { focused = it.isFocused },
+            .onFocusChanged {
+                focused = it.isFocused
+                // 焦点自检日志：电视上「按了没反应」时，靠这个判断焦点到底落在哪。
+                android.util.Log.i(FOCUS_TAG, "焦点 ${if (it.isFocused) "获得" else "失去"}: $text")
+            },
+        shape = ButtonShape,
         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
             containerColor = bg,
             contentColor = fg,
         ),
+        elevation = null,
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 11.dp),
     ) {
-        // 焦点态加粗 + 前置标记，三重信号叠加
+        // 聚焦态加粗 + 前置圆点（宽度固定，不会让按钮宽度跳动）
         Text(
-            if (focused) "▶ $text" else text,
+            if (focused) "\u25CF $text" else text,
             fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
         )
     }

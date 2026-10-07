@@ -145,8 +145,9 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
             _error.value = "无效的二维码内容"
             return
         }
-        // 二维码未携带端口时回退到应用默认端口 8080（桌面端实际端口由 QR 内容携带）
-        val port = if (uri.port != -1) uri.port.toString() else "8080"
+        // 二维码未携带端口时回退到默认端口 38080（与电视端 ReceiverService.PORT_RANGE_START 一致；
+        // 电视端实际端口可能顺延到 38081~38085，那时二维码里会带真实端口）
+        val port = if (uri.port != -1) uri.port.toString() else "38080"
         connect(ip, port, "", Build.MODEL, "phone")
     }
 

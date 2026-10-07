@@ -28,8 +28,21 @@ class ReceiverService : Service() {
     companion object {
         const val CHANNEL_ID = "receiver"
         const val NOTIF_ID = 1001
-        /** 与桌面端一致的默认端口；被占用时依次 +1 尝试 */
-        const val BASE_PORT = 8080
+
+        /**
+         * 端口候选区间：38080~38085。
+         *
+         * 为什么不用 8080：局域网里 8080 是最常被占的端口（各种开发服务器、反向代理、
+         * 路由器管理页、部分智能家居），抢到就用容易与用户已有服务冲突，且难以排查。
+         * 38080 段基本只有本应用在用。
+         * 被占用时依次 +1 尝试，共 6 个候选。
+         */
+        const val PORT_RANGE_START = 38080
+        const val PORT_RANGE_END = 38085
+        const val PORT_RANGE_COUNT = PORT_RANGE_END - PORT_RANGE_START + 1
+
+        /** 与桌面端约定区间的首选端口 */
+        const val BASE_PORT = PORT_RANGE_START
 
         private const val TAG = "ReceiverService"
 
@@ -92,11 +105,11 @@ class ReceiverService : Service() {
 
     private fun startServer() {
         val ip = lanIp()
-        // 端口探测：8080 起依次尝试 5 个
+        // 端口探测：38080 起依次尝试 38081~38085（共 6 个候选）
         var started: ReceiverServer? = null
         var usedPort = 0
-        for (offset in 0 until 5) {
-            val p = BASE_PORT + offset
+        for (offset in 0 until PORT_RANGE_COUNT) {
+            val p = PORT_RANGE_START + offset
             try {
                 val s = ReceiverServer(
                     context = this,
@@ -131,7 +144,7 @@ class ReceiverService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(NOTIF_ID, buildNotification("接收中 · http://$ip:$usedPort"))
         } else {
-            appendLog("[server] 启动失败：所有候选端口均被占用")
+            appendLog("[server] 启动失败：$PORT_RANGE_START~$PORT_RANGE_END 全部被占用")
         }
     }
 
