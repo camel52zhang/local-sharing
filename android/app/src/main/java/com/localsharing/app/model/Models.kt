@@ -80,9 +80,7 @@ fun parseReceipt(body: String?): UploadReceipt = try {
     val o = JSONObject(body ?: "{}")
     val arr = o.optJSONArray("files")
     UploadReceipt(
-        // 用 has() 而非 optInt 的默认值：count=0 是有意义的值（部分成功），
-        // 而「未回报」必须用 null 表达，不能和 0 混同
-        count = if (o.has("count")) o.optInt("count") else null,
+        count = parseCountOrNull(o.opt("count")),
         transferId = o.optString("transferId").takeIf { it.isNotEmpty() },
         files = buildList {
             // files 为对象而非数组时 optJSONArray 返回 null，已天然处理
@@ -96,4 +94,20 @@ fun parseReceipt(body: String?): UploadReceipt = try {
 } catch (_: Exception) {
     // "not json" / "{}" / {"files":{}} / {"count":"abc"} 等畸形输入都落这里
     UploadReceipt()
+}
+
+/**
+ * 解析 `count`，**非数字一律返回 null（视为「未回报」）**。
+ *
+ * 为什么不能用 `optInt`：它在解析失败时返回默认值 `0`，于是 `{"count":"abc"}`
+ * 会得到 `count = 0`。而 `count` 的语义是「接收端确认落盘了几个」，
+ * 0 会被调用方判为 PARTIAL（发3 个只落地 0 个）——**一条类型脏数据被误报成部分失败**。
+ * 「未回报」与「回报 0」必须严格区分，所以这里显式做类型判定。
+ */
+private fun parseCountOrNull(raw: Any?): Int? = when (raw) {
+    // JSONObject.NULL 也要归为「未回报」
+    is Number -> raw.toInt()
+    // 宽松接受可解析的数字字符串（不严谨的服务端可能这么写），其余一律 null
+    is String -> raw.toIntOrNull()
+    else -> null
 }
