@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material3.Card
+import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -92,9 +94,14 @@ fun FileCard(
     }
 }
 
-/** 连接状态横幅 */
+/**
+ * 连接状态横幅。[label] 是设备展示名（alias ?: name）。
+ *
+ * 离线设备一律用中性文案（「昨天可达」），**不用红色报错** ——
+ * 电视关机是常态，用户不该以为设备坏了。
+ */
 @Composable
-fun ConnectionBanner(connected: Boolean, reconnecting: Boolean, pcName: String) {
+fun ConnectionBanner(connected: Boolean, reconnecting: Boolean, label: String) {
     val container = when {
         reconnecting -> MaterialTheme.colorScheme.errorContainer
         connected -> MaterialTheme.colorScheme.primaryContainer
@@ -112,14 +119,35 @@ fun ConnectionBanner(connected: Boolean, reconnecting: Boolean, pcName: String) 
     }
     val text = when {
         reconnecting -> "连接已断开，正在重连…"
-        connected -> "已连接到 $pcName"
-        else -> "连接已断开"
+        connected -> "已连接到 $label"
+        label.isNotBlank() -> "未连接到 $label"
+        else -> "未连接到设备"
     }
     Surface(color = container, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Surface(Modifier.size(8.dp), shape = CircleShape, color = dot) {}
             Spacer(Modifier.size(8.dp))
             Text(text, color = onContainer, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+/** 通用分区卡片：标题 + 内容槽。发送区/ 设备区统一用它，避免各页自造标题样式 */
+@Composable
+fun SectionCard(
+    title: String,
+    modifier: Modifier = Modifier,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    Card(modifier = modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                trailing?.invoke()
+            }
+            Spacer(Modifier.height(12.dp))
+            content()
         }
     }
 }

@@ -69,10 +69,11 @@ private val openDocumentTreeContract = ActivityResultContracts.OpenDocumentTree(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(vm: ShareViewModel) {
+fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pcInfo by vm.pcInfo.collectAsState()
+    val activeDevice by vm.activeDevice.collectAsState()
+    val devices by vm.devices.collectAsState()
     val error by vm.error.collectAsState()
     val selected by vm.selectedItems.collectAsState()
     val uploading by vm.uploading.collectAsState()
@@ -85,6 +86,7 @@ fun HomeScreen(vm: ShareViewModel) {
     val saveDirName by vm.saveDirName.collectAsState()
     val saveDirUri by vm.saveDirUri.collectAsState()
 
+    val targetLabel = activeDevice?.label.orEmpty()
     val snackbarHostState = remember { SnackbarHostState() }
     var showLog by remember { mutableStateOf(false) }
     val crashedLastRun = remember { CrashLogCollector.lastRunCrashed }
@@ -198,10 +200,14 @@ fun HomeScreen(vm: ShareViewModel) {
                 title = {
                     Column {
                         Text("local-sharing")
-                        Text("已连接：${pcInfo.name}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            "发送至：$targetLabel",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
                     }
                 },
                 actions = {
+                    OutlinedButton(onClick = onOpenHistory) { Text("历史") }
                     OutlinedButton(onClick = { showLog = true }) { Text("诊断日志") }
                     OutlinedButton(onClick = { vm.disconnect() }) { Text("断开") }
                 },
@@ -248,15 +254,15 @@ fun HomeScreen(vm: ShareViewModel) {
                 ConnectionBanner(
                     connected = conn == ConnState.Connected,
                     reconnecting = conn == ConnState.Reconnecting,
-                    pcName = pcInfo.name,
+                    label = targetLabel,
                 )
             }
 
-            // ---- 发送到电脑 ----
+            // ---- 发送区：选文件 → 选目标 → 发送（自上而下，PRD 关键布局约束）----
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("发送到电脑", style = MaterialTheme.typography.titleMedium)
+                        Text("选择要发送的内容", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Button(onClick = { pickFiles.launch(Unit) }, modifier = Modifier.weight(1f)) {
@@ -271,7 +277,7 @@ fun HomeScreen(vm: ShareViewModel) {
                             EmptyState(
                                 icon = Icons.Filled.InsertDriveFile,
                                 title = "还没有选择文件",
-                                subtitle = "选择文件或文件夹，即可发送到电脑",
+                                subtitle = "选择文件或文件夹，再选择发给哪台设备",
                             )
                         } else {
                             selected.forEachIndexed { idx, item ->
@@ -285,9 +291,19 @@ fun HomeScreen(vm: ShareViewModel) {
                                 )
                             }
                             Spacer(Modifier.height(12.dp))
+                            // 目标选择器放在文件列表之后：选文件与目标无关（PRD G5），
+                            // 让系统分享进来的文件也能直接选目标（US-5）
+                            OutlinedButton(
+                                onClick = onOpenPicker,
+                                // 上传中置灰：入口层门闸。正确性由SendTarget 冻结快照保证，
+                                // 状态机层 selectDevice 也会拒绝 —— 三者独立成立
+                                enabled = !uploading,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("发送至：$targetLabel ▾") }
+                            Spacer(Modifier.height(8.dp))
                             Button(
                                 onClick = { vm.sendSelected() },
-                                enabled = !uploading,
+                                enabled = !uploading && conn == ConnState.Connected,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
                                 if (uploading) {
@@ -296,7 +312,8 @@ fun HomeScreen(vm: ShareViewModel) {
                                     // progress < 0 = 总量未知（provider 不提供 SIZE 列），不显示误导性的 0%
                                     Text(if (progress < 0f) " 正在发送…" else " ${(progress * 100).toInt()}%")
                                 } else {
-                                    Text("发送到电脑")
+                                    // 文案带目标名：避免发错设备的最后一道确认
+                                    Text(if (targetLabel.isBlank()) "发送" else "发送到 $targetLabel")
                                 }
                             }
                             if (uploading) {

@@ -18,12 +18,15 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.localsharing.app.ui.ConnectScreen
+import com.localsharing.app.ui.DevicePickerScreen
+import com.localsharing.app.ui.HistoryScreen
 import com.localsharing.app.ui.HomeScreen
 import com.localsharing.app.ui.ScannerScreen
 import com.localsharing.app.ui.theme.LocalSharingTheme
-import com.localsharing.app.viewmodel.ConnState
 import com.localsharing.app.viewmodel.ShareViewModel
 
 /**
@@ -123,6 +126,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * 根导航：扫码 / 设备选择 / 发送页 / 首次连接（PRD 5.1 四态）。
+ *
+ * 关键规则（PRD 5.2②）：**只有 ≥2 台设备时才进 [DevicePickerScreen]**。
+ * 单设备时首页顶部的目标条点了直接回连当前设备 —— 没有得选，多一次点击纯属噪音。
+ */
 @Composable
 fun AppRoot(
     vm: ShareViewModel,
@@ -130,6 +139,11 @@ fun AppRoot(
     onScanRequest: () -> Unit,
 ) {
     val conn by vm.connState.collectAsState()
+    val devices by vm.devices.collectAsState()
+    val active by vm.activeDevice.collectAsState()
+    // 切到设备列表/历史的局部导航状态。用 rememberSaveable 让返回键与旋转后不丢
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+    var showHistory by rememberSaveable { mutableStateOf(false) }
 
     when {
         scanning.value -> ScannerScreen(
@@ -139,7 +153,37 @@ fun AppRoot(
             },
             onCancel = { scanning.value = false },
         )
-        conn is ConnState.Connected -> HomeScreen(vm)
-        else -> ConnectScreen(vm, onScan = onScanRequest)
+
+        showHistory -> HistoryScreen(vm, onBack = { showHistory = false })
+
+        showPicker -> DevicePickerScreen(
+            vm = vm,
+            onScan = onScanRequest,
+            onBack = { showPicker = false },
+            onPicked = { showPicker = false },
+        )
+
+        // 有目标设备即可进发送页：连接中/重连中也要能进去看到横幅与进度（PRD §3.2）
+        active != null -> HomeScreen(
+            vm = vm,
+            onOpenPicker = { showPicker = true },
+            onOpenHistory = { showHistory = true },
+        )
+
+        // 设备列表为空 = 首次使用
+        devices.isEmpty() -> ConnectScreen(
+            vm = vm,
+            onScan = onScanRequest,
+            onOpenManual = { showPicker = true },
+            showManual = false,
+        )
+
+        // 列表非空但当前无目标（如用户显式断开过）→ 回到设备列表重新选一台
+        else -> DevicePickerScreen(
+            vm = vm,
+            onScan = onScanRequest,
+            onBack = { showPicker = false },
+            onPicked = { showPicker = false },
+        )
     }
 }
