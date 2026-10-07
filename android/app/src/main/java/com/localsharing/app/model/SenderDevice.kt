@@ -63,18 +63,22 @@ object SenderDeviceCodec {
     )
 
     /**
-     * 超出上限时按 `lastOkAt` 由小到大淘汰。
+     * 超出上限时淘汰 `lastOkAt` **最小**（最久没成功连通）的那些。
      *
      * **LRU 键为什么只用 `lastOkAt`、不另设 `lastUsedAt`**：这是刻意的取舍——
      * 最久没成功连通的设备恰好就是最该被淘汰的那个（连不上的留着没用），
      * 少一个字段就少一处会不同步的状态。代价是「刚选中但没连上」的设备分数不刷新，
      * 用 [protectId] 守卫兜住：当前目标设备绝不淘汰（它可能正在重连）。
+     *
+     * ⚠️ 必须 `sortedByDescending`（新的在前）再 `take`：升序+take 会把
+     * **最久没连通的**留在列表里、淘汰掉刚连通过的 —— 与 LRU 意图正好相反。
      */
     fun trimToLimit(list: List<SenderDevice>, limit: Int = MAX_DEVICES, protectId: String? = null): List<SenderDevice> {
         if (list.size <= limit) return list
-        // 保护项 + 按 lastOkAt 升序的其余项，取够 limit 条
+        // 保护项（当前目标，可能正在重连）无条件保留
         val protected = list.filter { it.id == protectId }
-        val rest = list.filter { it.id != protectId }.sortedBy { it.lastOkAt }
+        // 其余按 lastOkAt 降序（最近连通过的在前），取够 limit 条 = 淘汰最久未连通的
+        val rest = list.filter { it.id != protectId }.sortedByDescending { it.lastOkAt }
         val keep = (limit - protected.size).coerceAtLeast(0)
         return protected + rest.take(keep)
     }
