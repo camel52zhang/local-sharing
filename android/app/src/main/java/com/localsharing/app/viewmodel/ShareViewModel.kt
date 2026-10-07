@@ -627,8 +627,10 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         if (session.state != ConnState.Connected) return
 
         // ★★★ 冻结目标快照（正确性保证，设计文档 §1.4）★★★
-        // 从这一行起，上传协程只读 target 这个不可变对象，**不再回读任何 StateFlow**。
-        // 「上传中切设备」只改 _activeDeviceId，物理上碰不到 target —— 文件绝不会发到别的设备。
+        // 上传目标（baseUrl/token/remoteDeviceId）从这一行起只读 target 这个不可变对象，
+        // **不再回读 _sessions / _devices / _activeDeviceId**。
+        // 「上传中切设备」只改 _activeDeviceId，物理上碰不到 target —— 文件绝不会发到别的设备，
+        // token 也不可能串到别的设备上。
         val target = SendTarget.of(device, session) ?: return
         val asFolder = items.any { it.isFolder }
         val startedAt = System.currentTimeMillis()
