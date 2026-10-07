@@ -5,6 +5,7 @@ import android.provider.MediaStore
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoWSD
 import fi.iki.elonen.NanoWSD.WebSocketFrame.CloseCode
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -21,6 +22,8 @@ import java.util.Locale
  * - GET  /api/info        -> { name, port, lanIp, connectUrl, requiresCode:false }
  * - POST /api/devices     -> urlencoded(name,type,code,clientId) -> { deviceId, token, wsUrl:"" }
  * - POST /api/upload      -> multipart(files[], asFolder)，头 x-device-id / x-token
+ *                            响应 { ok, count, transferId, files:[{name,size}] }
+ *                            （count/transferId/files 为加法式扩展，旧版手机不读响应体故不受影响）
  * - WS   /ws?token=xxx    -> 只握手保活，不推业务消息（手机端 WS 断开会触发重连报错）
  *
  * 接收的文件保存到公共 Downloads/local-sharing/（API 29+ 走 MediaStore，无需权限）。
@@ -272,6 +275,8 @@ class ReceiverServer(
 
         val now = System.currentTimeMillis()
         val fmt = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+        //顺带收集已落盘的 ReceivedItem.id，作为回执里的 transferId（与电视端接收记录对账的钥匙）
+        val savedIds = mutableListOf<String>()
         synchronized(saveLock) {
             saved.forEachIndexed { idx, (name, size) ->
                 val item = ReceivedItem(
@@ -283,10 +288,26 @@ class ReceiverServer(
                     isApk = name.lowercase(Locale.US).endsWith(".apk"),
                 )
                 ReceiverStore.appendReceived(context, item)
+                savedIds.add(item.id)
                 onReceived(item)
             }
         }
-        return json(Response.Status.OK, """{"ok":true,"count":${saved.size}}""")
+        // 加法式扩展：ok/count 语义与改前逐字节不变，仅追加 transferId 与 files[]。
+        // 旧版手机的成功分支根本不读响应体（ShareApi.uploadFiles 丢弃 body），
+        // 因此新增字段对它们完全不可见 —— 这是协议向后兼容的基石。
+        val filesJson = JSONArray()
+        saved.forEach { (name, size) ->
+            // name 取 saveToDownloads 回读的真实落盘名（actualName），
+            // 含 MediaStore 同名自动改名（photo.jpg -> photo (1).jpg），
+            // 这样手机历史里显示的名字与电视上实际看到的文件一致。
+            filesJson.put(JSONObject().put("name", name).put("size", size))
+        }
+        val obj = JSONObject()
+            .put("ok", true)
+            .put("count", saved.size)
+            .put("transferId", savedIds.firstOrNull() ?: "")
+            .put("files", filesJson)
+        return json(Response.Status.OK, obj.toString())
     }
 
     /** 保存到公共 Downloads/local-sharing/，返回 (显示名, 实际大小) */

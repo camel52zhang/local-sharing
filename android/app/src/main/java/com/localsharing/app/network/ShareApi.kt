@@ -5,6 +5,8 @@ import android.net.Uri
 import com.localsharing.app.model.OutgoingItem
 import com.localsharing.app.model.PcInfo
 import com.localsharing.app.model.RegisterResult
+import com.localsharing.app.model.UploadReceipt
+import com.localsharing.app.model.parseReceipt
 import com.localsharing.app.util.getSize
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -69,10 +71,19 @@ object ShareApi {
     }
 
     /**
-     * 上传结果：成功与否 + 失败原因（HTTP 状态码 / 响应体 / 异常信息）。
+     * 上传结果：成功与否 + 失败原因（HTTP 状态码 / 响应体 / 异常信息）+ 回执。
      * 失败原因会透传到手机 UI，避免只显示「发送失败，请检查连接」而无法定位。
+     *
+     * [receipt] 是接收端回报的落盘明细（`/api/upload` 同步返回即代表落盘完成，
+     * 响应体本身就是回执）。旧版接收端不回报时为 [UploadReceipt] 空实例。
      */
-    data class UploadResult(val ok: Boolean, val detail: String = "")
+    data class UploadResult(
+        val ok: Boolean,
+        val detail: String = "",
+        /** 0 = 根本没拿到响应（连接失败） */
+        val httpCode: Int = 0,
+        val receipt: UploadReceipt = UploadReceipt(),
+    )
 
     /**
      * 手机 → 电脑：上传一个或多个文件。
@@ -105,10 +116,13 @@ object ShareApi {
             client.newCall(req).execute().use { resp ->
                 val bodyText = runCatching { resp.body?.string().orEmpty() }.getOrDefault("")
                 if (resp.isSuccessful) {
-                    UploadResult(true)
+                    // 同步200 即代表接收端已落盘完成，响应体本身就是回执。
+                    // 解析再包一层 runCatching：回执解析失败绝不能把成功的发送误判为失败。
+                    val receipt = runCatching { parseReceipt(bodyText) }.getOrDefault(UploadReceipt())
+                    UploadResult(true, "", resp.code, receipt)
                 } else {
                     // 服务端返回 4xx/5xx 时把状态码与响应体带回去，是定位问题的第一手证据
-                    UploadResult(false, "HTTP ${resp.code} ${bodyText.take(200)}".trim())
+                    UploadResult(false, "HTTP ${resp.code} ${bodyText.take(200)}".trim(), resp.code)
                 }
             }
         } catch (e: Exception) {

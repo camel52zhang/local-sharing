@@ -255,7 +255,16 @@ export function buildApp(): express.Express {
         }));
         const asFolder = req.body?.asFolder === '1' || req.body?.asFolder === 'true';
         const saved = recordReceived(device, files, asFolder);
-        res.json({ ok: true, files: saved });
+        // 加法式扩展：ok/files 语义与改前一致，仅追加 count 与 transferId。
+        // 旧版手机的成功分支不读响应体（ShareApi.uploadFiles 丢弃 body），故对它们完全不可见。
+        // files[] 只出 name/size：**不把 savedPath（本机绝对路径）发给局域网客户端**，
+        // 全项目无消费方读它，纯信息泄露。
+        res.json({
+          ok: true,
+          count: saved.length,
+          transferId: saved[0]?.id ?? '',
+          files: saved.map((f) => ({ name: f.name, size: f.size })),
+        });
       } catch (e) {
         next(e);
       }
