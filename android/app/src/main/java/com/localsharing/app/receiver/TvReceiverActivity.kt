@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
+import com.localsharing.app.BuildConfig
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
@@ -80,6 +81,11 @@ class TvReceiverActivity : ComponentActivity() {
 
         /** API 28- 写公共存储的运行时权限请求码 */
         private const val REQ_WRITE_EXTERNAL = 2001
+
+        /** 仅 debug：adb 广播触发安装流程的 action（release 包不注册，见 registerInstallDebugHook） */
+        const val ACTION_DEBUG_INSTALL = "com.localsharing.app.DEBUG_INSTALL"
+        const val EXTRA_FILE_NAME = "file_name"
+        const val EXTRA_FILE_SIZE = "file_size"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,7 +121,54 @@ class TvReceiverActivity : ComponentActivity() {
                 ReceiverScreen(onStop = { finish() })
             }
         }
+        registerInstallDebugHook()
         ReceiverService.start(this)
+    }
+
+    /**
+     * **仅 debug 构建注册**的安装流程测试入口。
+     *
+     * 用途：模拟器/真机上无法可靠点击 Compose 的「安装」按钮（uiautomator 对 Compose
+     * 支持弱、headless 截图全黑），需要一种可脚本化触发 `installApk` 的方式，
+     * 以便用 `adb shell am broadcast` 精确复现「点安装→崩溃」并抓完整 logcat。
+     *
+     * 走的是**与真实按钮完全相同的调用链**（同一个 `installApk` 入口），
+     * 所以验证有效。用 `BuildConfig.DEBUG` 圈定，release 包不注册这个 receiver，
+     * 正式交付路径上不存在此代码。
+     */
+    private fun registerInstallDebugHook() {
+        if (!BuildConfig.DEBUG) return
+        val filter = android.content.IntentFilter(ACTION_DEBUG_INSTALL)
+        filter.addCategory(android.content.Intent.CATEGORY_DEFAULT)
+        try {
+            registerReceiver(
+                object : android.content.BroadcastReceiver() {
+                    override fun onReceive(ctx: android.content.Context, intent: Intent) {
+                        val name = intent.getStringExtra(EXTRA_FILE_NAME)
+                        val size = intent.getLongExtra(EXTRA_FILE_SIZE, 0L)
+                        if (name.isNullOrBlank()) {
+                            installLog("DEBUG 广播缺少 $EXTRA_FILE_NAME，中止")
+                            return
+                        }
+                        val item = ReceivedItem(
+                            id = "debug-${System.currentTimeMillis()}",
+                            name = name,
+                            size = size,
+                            fromDevice = "debug-hook",
+                            time = System.currentTimeMillis(),
+                            isApk = name.endsWith(".apk", ignoreCase = true),
+                        )
+                        installLog("DEBUG 广播触发安装：$name (${formatSize(size)})")
+                        installApk(this@TvReceiverActivity, item)
+                    }
+                },
+                filter,
+                android.content.Context.RECEIVER_NOT_EXPORTED,
+            )
+            android.util.Log.i(INSTALL_TAG, "DEBUG install hook registered")
+        } catch (t: Throwable) {
+            android.util.Log.e(INSTALL_TAG, "DEBUG hook 注册失败", t)
+        }
     }
 
     override fun onResume() {
