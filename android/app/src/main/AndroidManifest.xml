@@ -92,6 +92,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- PackageInstaller 安装结果回调（API 24+ 的 IntentSender 才会回调到它）。
+             没注册的话会话提交后拿不到成功/失败结果，用户不知道装没装上。 -->
+        <receiver
+            android:name=".receiver.InstallResultReceiver"
+            android:exported="false" />
+
         <!-- 一键安装 APK：FileProvider 共享缓存文件给系统安装器 -->
         <provider
             android:name="androidx.core.content.FileProvider"

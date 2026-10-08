@@ -504,7 +504,7 @@ private fun SaveLocationDialog(
                     ) { Text("返回") }
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        "下载/${ReceiverStore.SAVE_ROOT}" + if (cwd.isEmpty()) "" else "/$cwd",
+                        "${downloadsDirName()}/${ReceiverStore.SAVE_ROOT}" + if (cwd.isEmpty()) "" else "/$cwd",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Bold,
                     )
@@ -593,7 +593,7 @@ private fun NewFolderDialog(
         text = {
             Column {
                 Text(
-                    "位置：下载/${ReceiverStore.SAVE_ROOT}" +
+                    "位置：${downloadsDirName()}/${ReceiverStore.SAVE_ROOT}" +
                         if (parentPath.isEmpty()) "" else "/$parentPath",
                     fontSize = 13.sp,
                 )
@@ -697,6 +697,9 @@ private fun TvButton(
             runCatching { it.requestFocus() }
         }
     }
+    // ★ 焦点态底色：琥珀色是本项目唯一与所有常态色都高对比的颜色。
+    // primary 的蓝色 0xFF1F6FEB 在电视上与琥珀太接近（用户实拍反馈「看不出选中哪个」），
+    // 所以焦点态**不再沿用 primary 的蓝**，一律换成琥珀。
     val bg by animateColorAsState(
         if (focused) FocusAmber else if (primary) Color(0xFF1F6FEB) else Color(0xFF232C34),
         label = "tvBtnBg",
@@ -717,13 +720,24 @@ private fun TvButton(
             // 不再用硬边框——之前 3dp 直角描边套在 Material 圆角按钮上，
             // 内外圆角不一致，看起来像「方框套方框」，很廉价。
             .then(
+                // ★★ 关键：**填充 vs 描边** 是不依赖颜色的第二信号。
+                // 电视隔着几米、亮度高/偏色时，颜色差异不可靠；
+                // 但「实心填充」与「空心描边」的形状差异一眼可辨。
+                // 焦点态：明显放大 + 无描边（纯实心） + 前置●标记
+                // 非焦点：1.15x 缩放足够醒目 + 极淡描边
                 if (focused) Modifier
-                    .scale(1.06f)
-                else Modifier.border(
-                    width = 1.dp,
-                    color = FocusIdleBorder,
+                    .scale(1.15f)                // 1.06 在 1080p 电视上几乎看不出，提到 1.15
+                else Modifier
+                    .scale(1f)
+                    .border(width = 1.dp, color = FocusIdleBorder, shape = ButtonShape),
+            )
+            // 焦点态加一圈亮色外描边（叠在实心底上，等于"高亮+填充"双信号）
+            .then(
+                if (focused) Modifier.border(
+                    width = 3.dp,
+                    color = Color.White.copy(alpha = 0.9f),
                     shape = ButtonShape,
-                ),
+                ) else Modifier,
             )
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .focusable()
@@ -1063,6 +1077,17 @@ private fun copyToPrivateDir(
 }
 
 /** 提示「用电视文件管理打开这个绝对路径」；[path] 一定拼进文案，用户才有事可做 */
+/** 系统里下载目录的真实名字（通常是英文 `Download`）。
+ *  UI 上不要写「下载」这种中文本地化词——用户在文件管理器里看到的是英文，
+ *  显示中文会让用户怀疑自己找错了地方。 */
+private fun downloadsDirName(): String = try {
+    android.os.Environment
+        .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+        .name
+} catch (t: Throwable) {
+    android.os.Environment.DIRECTORY_DOWNLOADS
+}
+
 private fun toastManualPath(context: android.content.Context, path: String) {
     runCatching {
         Toast.makeText(
@@ -1378,9 +1403,122 @@ private fun continueInstallOnUiThread(
         }
     }
 
-    installLog("两种安装 action 均失败，转手动安装兜底")
+    installLog("两种安装 action 均失败，尝试应用内安装（PackageInstaller API）")
+    if (installViaPackageInstaller(context, target)) return
+
+    installLog("应用内安装也不可用，转手动安装兜底")
     fallbackToManualInstall(context, item, source)
 }
+/**
+ * 用 [android.content.pm.PackageInstaller] 走**应用内安装**，绕开「系统没有安装器 app」的问题。
+ *
+ * ## 为什么需要这条路径
+ * 部分定制电视 ROM（TCL 65V6-A65F 实测）**根本没有 `com.android.packageinstaller`**，
+ * 也没有任何 activity 响应 `ACTION_VIEW` / `ACTION_INSTALL_PACKAGE` +
+ * `application/vnd.android.package-archive`，`startActivity` 抛 `ActivityNotFoundException`，
+ * 用户只能拿到一句「本机没有系统安装器」——功能上等于没有「安装」按钮。
+ *
+ * `PackageInstaller` 是**框架 API**，由系统包管理器自己弹确认界面，
+ * **不依赖任何第三方安装器 app**，因此在这类 ROM 上仍可用。
+ *
+ * ## API 硬限制（不要误认为能做到静默安装）
+ * - **API 21+**（本项目 minSdk 21，刚好满足）
+ * - **必须用户确认**。普通应用没有 `INSTALL_PACKAGES` 签名级权限，
+ *   静默安装会失败且属于违规；这里走系统弹确认界面的合规路径。
+ * - `REQUEST_INSTALL_PACKAGES`（API 26+）是用户确认式安装的前置权限，
+ *   缺会抛 `SecurityException`，需用户先去系统设置里开启。
+ *
+ * @return true 表示已成功交给系统安装流程（用户会看到确认界面）
+ */
+private fun installViaPackageInstaller(
+    context: android.content.Context,
+    apk: File,
+): Boolean {
+    if (Build.VERSION.SDK_INT < 21) return false
+    if (!apk.exists() || apk.length() <= 0L) {
+        installLog("PackageInstaller：APK 不存在或为空，放弃")
+        return false
+    }
+    var sessionId = -1
+    return try {
+        // ★ 必须用 getPackageManager().packageInstaller 显式取：
+        // `packageInstaller` 是 Context 的 Kotlin 扩展属性，当参数静态类型是
+        // android.content.Context（非 ContextWrapper 子类）时扩展解析不出来。
+        val pi = context.getPackageManager().packageInstaller
+        // ★ 统一用 SessionParams(MODE_FULL_INSTALL) —— 这个重载从 API 21 就有，
+        // 无参 createSession() 在 SDK 34 的 stub 里已被移除（编译报缺参数 p0），
+        // 用版本分支反而在低版本上踩坑。
+        sessionId = pi.createSession(
+            android.content.pm.PackageInstaller.SessionParams(
+                android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL,
+            ),
+        )
+
+        // Kotlin 1.9 下 PackageInstaller.Session 的 use{} 扩展在 Android SDK 34 上有歧义
+        // （Session 实现 Closeable 但 SDK stub 里close() 标了throws），直接用 try/finally 更稳。
+        val session = pi.openSession(sessionId)
+        try {
+            val out = session.openWrite("base.apk", 0, -1)
+            try {
+                apk.inputStream().use { input -> input.copyTo(out, 128 * 1024) }
+            } finally {
+                runCatching { out.close() }
+            }
+            // ★ 统一用带 IntentSender 的 commit，无版本分支。
+            //   - IntentSender 从 API 21 就有，低版本同样可用
+            //   - 无参 commit() 在 SDK 34 的 stub 里已被移除（编译报缺参数 p0）
+            //   - FLAG_MUTABLE 是 API 31+ 常量，必须版本守卫，
+            //     低版本直接引用会是 NoSuchFieldError（Error，不是 Exception）
+            val piIntent = android.content.Intent(context, InstallResultReceiver::class.java)
+            val mutable = if (Build.VERSION.SDK_INT >= 31)
+                android.app.PendingIntent.FLAG_MUTABLE else 0
+            val flags = android.app.PendingIntent.FLAG_UPDATE_CURRENT or mutable
+            // PendingIntent.getBroadcast 返回平台类型（PendingIntent!），
+            // Kotlin 不允许隐式赋给 IntentSender，必须显式 as
+            val sender = android.app.PendingIntent
+                .getBroadcast(context, sessionId, piIntent, flags)
+                as android.content.IntentSender
+            session.commit(sender)
+        } finally {
+            runCatching { session.close() }
+        }
+        installLog("PackageInstaller：会话已提交 sessionId=$sessionId，等待系统确认安装")
+        Toast.makeText(context, "已交给系统安装，请确认", Toast.LENGTH_LONG).show()
+        true
+    } catch (t: Throwable) {
+        // 常见失败：REQUEST_INSTALL_PACKAGES 未授权(SecurityException)、空间不足、签名冲突。
+        // **全部如实上报，绝不做假成功。**
+        installLog("PackageInstaller 失败：${t.javaClass.simpleName}: ${t.message}")
+        if (sessionId >= 0) runCatching { context.getPackageManager().packageInstaller.abandonSession(sessionId) }
+        val needPerm = Build.VERSION.SDK_INT >= 26 &&
+            !context.packageManager.canRequestPackageInstalls()
+        Toast.makeText(
+            context,
+            if (needPerm) "请先在系统设置里允许「安装未知应用」"
+            else "本机无法应用内安装，请用文件管理/应用中心安装",
+            Toast.LENGTH_LONG,
+        ).show()
+        false
+    }
+}
+
+/** 接收 PackageInstaller 的安装结果（API 24+ 回调）：只如实上报，不自动重试 */
+class InstallResultReceiver : android.content.BroadcastReceiver() {
+    override fun onReceive(context: android.content.Context, intent: Intent) {
+        val status = intent.getIntExtra(
+            android.content.pm.PackageInstaller.EXTRA_STATUS,
+            android.content.pm.PackageInstaller.STATUS_FAILURE,
+        )
+        val msg = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE)
+        android.util.Log.i(INSTALL_TAG, "系统安装结果 status=$status msg=$msg")
+        val text = if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS)
+            "安装成功"
+        else
+            "安装失败：${msg ?: "未知原因"}"
+        Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+    }
+}
+
 
 /**
  * 用系统播放器/查看器打开已接收的文件（图片、视频、音频、PDF 等）。

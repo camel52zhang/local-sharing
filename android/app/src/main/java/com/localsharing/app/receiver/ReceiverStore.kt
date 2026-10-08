@@ -205,7 +205,23 @@ object ReceiverStore {
         // 降级过就如实显示应用私有目录，否则用户会以为文件在公共 Download 里却找不到
         getFallbackDir(context)?.let { return it }
         val sub = getSaveSubdir(context)
-        return if (sub.isEmpty()) "下载/$SAVE_ROOT" else "下载/$SAVE_ROOT/$sub"
+        // ★ 必须显示**系统里的真实目录名**（英文 `Download`），不能本地化成「下载」。
+        //
+        // 用户实拍反馈：电视文件管理器里有 `/storage/emulated/0/download`（小写）
+        // 和 `/storage/emulated/0/Download`（大写）**两个** local-sharing 目录，
+        // 而应用界面写「下载/local-sharing」—— 用户困惑为什么有两份、哪个才对。
+        //
+        // 实际落盘用的是 Environment.DIRECTORY_DOWNLOADS（字符串 "Download"），
+        // 那个小写 `download` 大概率是 ROM 或文件管理器另建的。
+        // 界面应如实显示系统里的真实名字，让用户能直接在文件管理器里搜到。
+        val root = try {
+            android.os.Environment
+                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                .name
+        } catch (t: Throwable) {
+            android.os.Environment.DIRECTORY_DOWNLOADS
+        }
+        return if (sub.isEmpty()) "$root/$SAVE_ROOT" else "$root/$SAVE_ROOT/$sub"
     }
 
     // ---- API 24-28 降级目录标记 ----
