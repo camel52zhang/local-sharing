@@ -716,9 +716,8 @@ private fun TvButton(
     Button(
         onClick = onClick,
         modifier = modifier
-            // 只在未聚焦时给一圈极淡的描边；聚焦态靠实心底色 + 缩放表达，
-            // 不再用硬边框——之前 3dp 直角描边套在 Material 圆角按钮上，
-            // 内外圆角不一致，看起来像「方框套方框」，很廉价。
+            // 非焦点：1dp 极淡描边（空心 vs 实心 = 不依赖颜色的形状信号）；
+            // 焦点：1.15x 放大 + 3dp 白色外圈（用 ButtonShape 同圆角，不会出现方框套方框）
             .then(
                 // ★★ 关键：**填充 vs 描边** 是不依赖颜色的第二信号。
                 // 电视隔着几米、亮度高/偏色时，颜色差异不可靠；
@@ -754,11 +753,21 @@ private fun TvButton(
         elevation = null,
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 11.dp),
     ) {
-        // 聚焦态加粗 + 前置圆点（宽度固定，不会让按钮宽度跳动）
-        Text(
-            if (focused) "\u25CF $text" else text,
-            fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
-        )
+        // 前置圆点必须用**固定宽度盒子占位**：Button 宽度包内容，
+        // 若聚焦时才把「● 」拼进文本，按钮会突然变宽 → 整行按钮向右抖动移位。
+        // 现在聚焦与否只改圆点可见性，按钮宽度恒定。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "\u25CF",
+                color = if (focused) fg else Color.Transparent,
+                fontSize = 9.sp,
+                modifier = Modifier.width(14.dp),
+            )
+            Text(
+                text,
+                fontWeight = if (focused) FontWeight.Bold else FontWeight.Normal,
+            )
+        }
     }
 }
 
@@ -1502,13 +1511,50 @@ private fun installViaPackageInstaller(
     }
 }
 
-/** 接收 PackageInstaller 的安装结果（API 24+ 回调）：只如实上报，不自动重试 */
+/**
+ * 接收 PackageInstaller 的会话回调（API 21+）：只如实上报，不自动重试。
+ *
+ * ★ 回调时序必须知道：`session.commit()` 之后**第一个**回调状态是
+ * `STATUS_PENDING_USER_ACTION`(-1)，系统把「安装确认界面」的 Intent 塞在
+ * `EXTRA_INTENT` 里交还给应用，**必须由应用自己 startActivity 拉起**。
+ * 不处理这个状态 = 用户永远看不到确认界面 = PackageInstaller 路径整体失效
+ * （表现恰是「Toast 说已交给系统安装，随后却弹 安装失败：null」——首轮实现踩过的坑）。
+ */
 class InstallResultReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: android.content.Context, intent: Intent) {
         val status = intent.getIntExtra(
             android.content.pm.PackageInstaller.EXTRA_STATUS,
             android.content.pm.PackageInstaller.STATUS_FAILURE,
         )
+        android.util.Log.i(INSTALL_TAG, "系统安装回调 status=$status")
+        if (status == android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            // getParcelableExtra(String) 在 API 33 起标废弃，但全版本可用且此处必须用裸 Intent 版本。
+            // 注意 extra key 是 Intent.EXTRA_INTENT（官方示例即此写法），
+            // PackageInstaller 类里没有 EXTRA_INTENT 这个常量。
+            @Suppress("DEPRECATION")
+            val confirm = runCatching {
+                intent.getParcelableExtra<android.content.Intent>(Intent.EXTRA_INTENT)
+            }.getOrNull()
+            if (confirm == null) {
+                android.util.Log.e(INSTALL_TAG, "PENDING_USER_ACTION 但 EXTRA_INTENT 为空")
+                Toast.makeText(context, "安装确认界面不可用，请改用文件管理安装", Toast.LENGTH_LONG).show()
+                return
+            }
+            try {
+                // 广播接收器没有 Activity 栈，必须带 NEW_TASK 才能拉起系统界面
+                context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                android.util.Log.i(INSTALL_TAG, "已拉起系统安装确认界面，等待用户确认")
+            } catch (t: Throwable) {
+                // 定制 ROM 可能连系统的确认 activity 都没有——如实上报，不装成功
+                android.util.Log.e(INSTALL_TAG, "拉起确认界面失败", t)
+                Toast.makeText(
+                    context,
+                    "本机无法弹出安装确认界面，请用文件管理/应用中心安装",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            return
+        }
         val msg = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE)
         android.util.Log.i(INSTALL_TAG, "系统安装结果 status=$status msg=$msg")
         val text = if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS)
