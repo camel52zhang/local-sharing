@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.MediaStore
+import android.view.KeyEvent
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -39,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -74,12 +77,71 @@ import java.util.Date
 import java.util.Locale
 
 /**
+ * Activity ↔ Compose 的焦点桥。
+ *
+ * 背景（真机实拍 111-19 反馈）：「保存位置 / 日志 / 停止接收 / 清空记录 / 安装 / 删除」
+ * 全部都已是带高亮的 TvButton，但用户截图里**没有任何按钮处于焦点态**——
+ * 问题不在按钮样式，而在**焦点整体丢失**（Compose Dialog 关闭不归还焦点、
+ * requestFocus 单发静默失败等）。焦点一丢，D-pad 按键在 Compose 里没有接收者，
+ * 表现就是「按了没反应、看不出选中了谁」。
+ *
+ * - Compose 侧：根节点 onFocusChanged 上报「子树是否有焦点」→ [hasFocus]
+ * - Activity 侧：[TvReceiverActivity.dispatchKeyEvent] 在 View 层拦截按键
+ *   （该层不依赖 Compose 焦点，无焦点时也一定收到 D-pad 事件），
+ *   检测到「D-pad + 无焦点」→ 调 [recall] 让 Compose 把焦点交回首按钮。
+ */
+internal object TvFocusBridge {
+    /** Compose 树内是否有任何聚焦节点（由根节点 onFocusChanged 维护） */
+    @Volatile var hasFocus: Boolean = true
+
+    /** 焦点召回回调（ReceiverScreen 进入组合时注册） */
+    @Volatile var recall: (() -> Unit)? = null
+}
+
+/** 遥控器导航键集合：方向键 + OK 键（DPAD_CENTER）+ 回车 */
+private fun isDpadKey(code: Int): Boolean = when (code) {
+    KeyEvent.KEYCODE_DPAD_UP,
+    KeyEvent.KEYCODE_DPAD_DOWN,
+    KeyEvent.KEYCODE_DPAD_LEFT,
+    KeyEvent.KEYCODE_DPAD_RIGHT,
+    KeyEvent.KEYCODE_DPAD_CENTER,
+    KeyEvent.KEYCODE_ENTER,
+    -> true
+    else -> false
+}
+
+/**
  * 电视接收模式主界面：与电脑端仪表盘同构的信息结构——
  * 左：二维码 + 连接地址 + 保存位置 + 操作按钮；
  * 右：已连接设备（含在线状态）+ 接收记录（含来源设备，APK 可一键安装）。
  * 为遥控器/D-pad 优化：可聚焦元素仅按钮类。
  */
 class TvReceiverActivity : ComponentActivity() {
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // 无焦点死区兜底之一（按键路径）：Compose 里没有聚焦节点时 D-pad 事件
+        // 理论上会无人消费落到这里，此时召回焦点。（实测 Compose 在无焦点时
+        // 也可能吃掉事件，所以这只是第二道防线；主防线是下面的窗口焦点回调。）
+        // hasFocus 检查不可省：焦点在但按键移到列表边界时事件也会落到这里，
+        // 无条件召回会把焦点「吸」回首按钮，破坏正常导航。
+        if (!TvFocusBridge.hasFocus && isDpadKey(keyCode)) {
+            android.util.Log.i(FOCUS_TAG, "无焦点 D-pad 按键(code=$keyCode)，召回焦点")
+            TvFocusBridge.recall?.invoke()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        android.util.Log.i(FOCUS_TAG, "窗口焦点 ${if (hasFocus) "获得" else "失去"}")
+        // ★ 无焦点死区兜底之二（主防线）：FocusRequester.requestFocus() 要求窗口
+        //   本身持有输入焦点，否则静默失败——这正是「启动/从别的界面回来后按
+        //   方向键没有任何按钮高亮」的根因：组合时窗口还没拿到焦点，3 次重试
+        //   全部白打，之后再没人请求。这里在窗口真正拿到焦点的瞬间再召回一次。
+        if (hasFocus) TvFocusBridge.recall?.invoke()
+    }
+
     companion object {
         /**
          * 「在线」判据的兜底宽限期：DevicePresence 是纯内存 object，[ReceiverServer.stop] 会 clear()，
@@ -241,6 +303,36 @@ private fun ReceiverScreen(onStop: () -> Unit) {
     // ★ D-pad 初始焦点：必须显式请求，否则启动后焦点无处可落，方向键无反应
     val firstFocus = remember { FocusRequester() }
 
+    // ★ 焦点召回开关：弹窗关闭、窗口焦点恢复、或 Activity 检测到「无焦点时按了
+    //   D-pad」都会自增它，触发把焦点交回「保存位置」。
+    // ★ 实测（模拟器 1080p TV 复现）：Compose 的 FocusRequester.requestFocus()
+    //   依赖宿主 AndroidComposeView 持有 **View 层焦点**；启动初期 View 焦点还没
+    //   落到 ComposeView 时，requestFocus 会静默 no-op（无异常、无事件）。
+    //   所以召回前先把 View 层焦点拉到 ComposeView（LocalView 即 AndroidComposeView），
+    //   再请求 Compose 焦点——启动后不按任何键，「保存位置」也是亮的。
+    val composeView = LocalView.current
+    var focusNonce by remember { mutableStateOf(0) }
+    LaunchedEffect(focusNonce) {
+        if (focusNonce > 0) {
+            kotlinx.coroutines.delay(200) // 等 Dialog 完全退出组合再要焦点
+            android.util.Log.i(FOCUS_TAG, "召回：准备 requestFocus（nonce=$focusNonce）")
+            runCatching {
+                if (!composeView.hasFocus()) composeView.requestFocus()
+                firstFocus.requestFocus()
+            }.onFailure { android.util.Log.e(FOCUS_TAG, "召回 requestFocus 抛异常", it) }
+        }
+    }
+    DisposableEffect(Unit) {
+        TvFocusBridge.recall = {
+            android.util.Log.i(FOCUS_TAG, "召回请求到达（recall invoke）")
+            focusNonce++
+        }
+        onDispose {
+            TvFocusBridge.recall = null
+            TvFocusBridge.hasFocus = true
+        }
+    }
+
     // 事件驱动刷新：服务端每次写入（新文件/新设备）都会自增 revision，UI 订阅它按需重载；
     // 读盘放在 IO 线程，避免在电视这种弱 CPU 上每 2 秒阻塞主线程。
     val revision by ReceiverStore.revision.collectAsState()
@@ -267,6 +359,9 @@ private fun ReceiverScreen(onStop: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxSize()
+                // 上报整个界面是否还有焦点（子树内任一节点聚焦即算有），
+                // 供 Activity 的 View 层兜底逻辑判断「无焦点死区」
+                .onFocusChanged { TvFocusBridge.hasFocus = it.hasFocus }
                 .background(Color(0xFF101418))
                 .padding(28.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -297,6 +392,14 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                     color = Color(0xFF8899A6),
                     fontSize = 13.sp,
                     maxLines = 2,
+                )
+                Spacer(Modifier.height(4.dp))
+                // 界面上直接显示构建版本：真机排障截图一眼识别装的是哪个包，
+                // 避免「修复了但电视上跑的还是旧包」这种反复空转
+                Text(
+                    "版本 ${com.localsharing.app.BuildConfig.VERSION_NAME}",
+                    color = Color(0xFF607086),
+                    fontSize = 12.sp,
                 )
                 Spacer(Modifier.height(14.dp))
                 Row {
@@ -377,11 +480,15 @@ private fun ReceiverScreen(onStop: () -> Unit) {
         if (showSettings) {
             SaveLocationDialog(
                 initial = ReceiverStore.getSaveSubdir(context),
-                onDismiss = { showSettings = false },
+                onDismiss = {
+                    showSettings = false
+                    focusNonce++ // Compose Dialog 关闭不归还焦点，主动召回
+                },
                 onConfirm = { sub ->
                     ReceiverStore.setSaveSubdir(context, sub)
                     savePath = ReceiverStore.savePathLabel(context)
                     showSettings = false
+                    focusNonce++
                 },
             )
         }
@@ -389,7 +496,10 @@ private fun ReceiverScreen(onStop: () -> Unit) {
         // 服务端运行日志：电视上没有 logcat 可看，排障时可直接截图反馈
         if (showLogs) {
             AlertDialog(
-                onDismissRequest = { showLogs = false },
+                onDismissRequest = {
+                    showLogs = false
+                    focusNonce++ // 返回键关弹窗同样不归还焦点，主动召回
+                },
                 title = { Text("服务日志（最近 ${status.log.size} 条）") },
                 text = {
                     if (status.log.isEmpty()) {
@@ -404,7 +514,12 @@ private fun ReceiverScreen(onStop: () -> Unit) {
                         }
                     }
                 },
-                confirmButton = { TextButton(onClick = { showLogs = false }) { Text("关闭") } },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showLogs = false
+                        focusNonce++ // Compose Dialog 关闭不归还焦点，主动召回
+                    }) { Text("关闭") }
+                },
             )
         }
     }
@@ -686,15 +801,18 @@ private fun TvButton(
     focusRequester: FocusRequester? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
-    // ★ 电视关键：Compose 不会自动把焦点交给第一个 focusable 组件。
-    // 不显式 requestFocus 的话，启动后焦点无处可落，**D-pad 方向键完全无反应**
-    //（返回键仍可用，因为它被系统直接拦截，不经过焦点系统）。
-    // 这就是「按了没反应」的根因。
     LaunchedEffect(Unit) {
-        focusRequester?.let {
-            // 延后一帧，等 Compose 完成首轮布局后再要焦点
-            kotlinx.coroutines.delay(120)
-            runCatching { it.requestFocus() }
+        focusRequester?.let { fr ->
+            // 单发可能静默失败（窗口未持输入焦点 / FocusNode 未挂进 hierarchy），
+            // 连发 3 次兜底；窗口焦点真正到位的一击由 Activity.onWindowFocusChanged 负责。
+            // 注意用命名参数 fr：repeat 的隐式 it 是循环索引，会遮蔽 let 外层的 it
+            repeat(3) { n ->
+                kotlinx.coroutines.delay(150)
+                runCatching { fr.requestFocus() }
+                    .onFailure {
+                        android.util.Log.e(FOCUS_TAG, "requestFocus 第${n + 1}次抛异常", it)
+                    }
+            }
         }
     }
     // ★ 焦点态底色：琥珀色是本项目唯一与所有常态色都高对比的颜色。
@@ -739,12 +857,16 @@ private fun TvButton(
                 ) else Modifier,
             )
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
-            .focusable()
             .onFocusChanged {
                 focused = it.isFocused
                 // 焦点自检日志：电视上「按了没反应」时，靠这个判断焦点到底落在哪。
                 android.util.Log.i(FOCUS_TAG, "焦点 ${if (it.isFocused) "获得" else "失去"}: $text")
             },
+        // ★★ 千万不能再加 .focusable()：Material3 Button 内部已自带 focusTarget，
+        // 再叠一个会造成「一按钮两个焦点目标」——D-pad 把焦点移到内部目标时，
+        // 外层 onFocusChanged 永远收不到事件，琥珀高亮永远不亮（真机 111-19
+        // 「看不出选中哪个」+ 模拟器 uiautomator 实证 focused=true 但 UI 无反应的根因）。
+        // 焦点观察/请求用上面的 focusRequester + onFocusChanged 挂在 Button 自身即可。
         shape = ButtonShape,
         colors = androidx.compose.material3.ButtonDefaults.buttonColors(
             containerColor = bg,
