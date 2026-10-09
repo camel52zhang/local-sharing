@@ -205,23 +205,41 @@ object ReceiverStore {
         // 降级过就如实显示应用私有目录，否则用户会以为文件在公共 Download 里却找不到
         getFallbackDir(context)?.let { return it }
         val sub = getSaveSubdir(context)
-        // ★ 必须显示**系统里的真实目录名**（英文 `Download`），不能本地化成「下载」。
-        //
-        // 用户实拍反馈：电视文件管理器里有 `/storage/emulated/0/download`（小写）
-        // 和 `/storage/emulated/0/Download`（大写）**两个** local-sharing 目录，
-        // 而应用界面写「下载/local-sharing」—— 用户困惑为什么有两份、哪个才对。
-        //
-        // 实际落盘用的是 Environment.DIRECTORY_DOWNLOADS（字符串 "Download"），
-        // 那个小写 `download` 大概率是 ROM 或文件管理器另建的。
-        // 界面应如实显示系统里的真实名字，让用户能直接在文件管理器里搜到。
-        val root = try {
-            android.os.Environment
-                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                .name
-        } catch (t: Throwable) {
-            android.os.Environment.DIRECTORY_DOWNLOADS
+        val rel = if (sub.isEmpty()) SAVE_ROOT else "$SAVE_ROOT/$sub"
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            // API 29+：MediaStore 固定落 Download/local-sharing（RELATIVE_PATH 必须挂在标准目录下）。
+            // 必须显示**系统里的真实目录名**（英文 `Download`），不能本地化成「下载」。
+            val root = try {
+                android.os.Environment
+                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    .name
+            } catch (t: Throwable) {
+                android.os.Environment.DIRECTORY_DOWNLOADS
+            }
+            return "$root/$rel"
         }
-        return if (sub.isEmpty()) "$root/$SAVE_ROOT" else "$root/$SAVE_ROOT/$sub"
+        // API 24~28：落专属顶层目录 /storage/emulated/0/local-sharing[/sub]。
+        //
+        // ★ 为什么不落 Download（2026-10-09 借鉴小白文件管理器后的决策）：
+        // 用户实拍证实 TCL ROM 上同时存在 download（小写，ROM 建）与 Download（大写，
+        // 我们建）两个目录，往 Download 写一个文件会在两个视图里同时出现、删一处两处
+        // 同消失——ROM 存储栈对这对大小写孪生目录做了交叉映射/双索引。
+        // 解剖小白（com.xiaobaifile.tv）实证：它接收文件落自己专属的 /xbfile、
+        // /umdownload，从不碰 Download，因此没有重复现象。本应用照搬该策略：
+        // 顶层 `local-sharing` 目录不存在大小写孪生，碰撞根除。
+        val base = android.os.Environment.getExternalStorageDirectory()
+        return "${base.absolutePath}/$rel"
+    }
+
+    /**
+     * API 24~28 的公共落盘目录（含用户子目录）：/storage/emulated/0/local-sharing[/sub]。
+     * 与 [savePathLabel] 的 API 24~28 分支必须保持一致——UI 显示什么路径，
+     * 文件就真的落在哪里。API 29+ 不要用这个（MediaStore 走 Download）。
+     */
+    fun legacyPublicDir(context: Context): File {
+        val sub = getSaveSubdir(context)
+        val base = android.os.Environment.getExternalStorageDirectory()
+        return if (sub.isEmpty()) File(base, SAVE_ROOT) else File(base, "$SAVE_ROOT/$sub")
     }
 
     // ---- API 24-28 降级目录标记 ----
@@ -318,6 +336,15 @@ object ReceiverStore {
         // 那里没有任何索引，必须直接扫盘，否则用户在界面上看不到任何已存在的目录。
         getFallbackDir(context)?.let { base ->
             val relBase = if (cur.isEmpty()) base else File(base, cur).absolutePath
+            File(relBase).listFiles()?.forEach { child ->
+                if (child.isDirectory) children += child.name
+            }
+        }
+
+        // 1.6) API 24~28 专属公共目录（/storage/emulated/0/local-sharing）：同样无索引，
+        // 直接扫盘补上实际存在的子目录（与 savePathLabel/legacyPublicDir 同一套路径）。
+        if (android.os.Build.VERSION.SDK_INT < 29) {
+            val relBase = File(legacyPublicDir(context), cur).absolutePath
             File(relBase).listFiles()?.forEach { child ->
                 if (child.isDirectory) children += child.name
             }

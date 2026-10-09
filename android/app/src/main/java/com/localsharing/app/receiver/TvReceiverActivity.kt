@@ -1855,8 +1855,9 @@ private fun guessMime(name: String): String {
 
 /**
  * API 24-28 定位已接收文件。
- * 依次尝试：① 当前保存位置下的应用私有降级目录（ReceiverServer 在公共目录不可写时用）
- *          ② 当前保存位置下的公共 Downloads 子目录
+ * 依次尝试：① 应用私有降级目录（ReceiverServer 在公共目录不可写时用）
+ *          ② 新专属公共目录 /storage/emulated/0/local-sharing[/sub]（2026-10-09 起）
+ *          ③ 旧公共 Downloads 子目录（本决策之前收到的历史文件）
  * 都找不到返回 null。
  */
 private fun locateReceivedFile(context: android.content.Context, displayName: String): File? {
@@ -1864,13 +1865,25 @@ private fun locateReceivedFile(context: android.content.Context, displayName: St
     val rel = if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub"
     val candidates = buildList {
         context.getExternalFilesDir(null)?.let { add(File(it, rel)) }
-        add(
-            File(
-                android.os.Environment
-                    .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-                rel,
-            ),
-        )
+        if (Build.VERSION.SDK_INT >= 29) {
+            add(
+                File(
+                    android.os.Environment
+                        .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                    rel,
+                ),
+            )
+        } else {
+            add(ReceiverStore.legacyPublicDir(context))
+            // 旧位置（Download/local-sharing）：版本升级前收到的文件还在那里
+            add(
+                File(
+                    android.os.Environment
+                        .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
+                    rel,
+                ),
+            )
+        }
     }
     return candidates.firstOrNull { File(it, displayName).exists() }
         ?.let { File(it, displayName) }

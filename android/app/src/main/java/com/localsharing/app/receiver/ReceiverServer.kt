@@ -351,15 +351,13 @@ class ReceiverServer(
             }
             return actualName to written
         }
-        // API 28-：优先写公共 Downloads；实测在 API 24~28 上这一步可能因
-        // 平台限制失败（进程拿不到 sdcard_rw 组 → mkdirs 静默失败 / 写入 Permission denied），
-        // 此时自动降级到应用私有外部目录（无需任何权限，必定可写），并回报真实路径。
-        val sub = ReceiverStore.getSaveSubdir(context)
-        val publicDir = File(
-            android.os.Environment
-                .getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),
-            if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub",
-        )
+        // API 28-：落专属顶层目录 /storage/emulated/0/local-sharing[/sub]（不走 Download）。
+        // ★ 2026-10-09 借鉴小白文件管理器：TCL ROM 上 Download 与 download（小写，ROM 建）
+        //   存在大小写孪生，往 Download 写文件会在两个视图重复出现、删一处两处同消失。
+        //   顶层 local-sharing 无孪生目录，碰撞根除（详见 ReceiverStore.savePathLabel 注释）。
+        //   依旧可能因平台限制失败（进程拿不到 sdcard_rw 组 → Permission denied），
+        //   此时自动降级到应用私有外部目录（无需任何权限，必定可写），并回报真实路径。
+        val publicDir = ReceiverStore.legacyPublicDir(context)
         if (publicDir.canWrite() || publicDir.mkdirs()) {
             try {
                 val (name, size) = writeToDir(publicDir, finalName, tmp)
@@ -375,6 +373,7 @@ class ReceiverServer(
         // 兜底：getExternalFilesDir 属于应用私有，无需任何运行时权限，API 24+ 均可写
         val privBase = context.getExternalFilesDir(null)
             ?: throw IllegalStateException("getExternalFilesDir 返回 null，无法落盘")
+        val sub = ReceiverStore.getSaveSubdir(context)
         val privDir = File(privBase, if (sub.isEmpty()) ReceiverStore.SAVE_ROOT else "${ReceiverStore.SAVE_ROOT}/$sub")
         val (name, size) = writeToDir(privDir, finalName, tmp)
         onLog("[save] 已降级落盘到应用目录: ${privDir.absolutePath}/$name")
