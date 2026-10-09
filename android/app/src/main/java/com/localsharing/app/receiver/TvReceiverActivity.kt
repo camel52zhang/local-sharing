@@ -1100,6 +1100,78 @@ private fun isUnder(child: File, dir: File): Boolean = try {
  * 而这正是本项目「局域网传输」的本职。本轮只做代码层准备（[apkHttpUrl] + 日志），
  * **端点本身不在本轮实现**。
  */
+/**
+ * 借道系统**特权安装工具**（欢视助手等）完成安装。
+ *
+ * ## 为什么这条路径成立（解剖 huanshizhushou.apk 的实证结论）
+ *
+ * TCL 欢视助手（`tv.huan.tvhelper`）的 Manifest 声明了 `INSTALL_PACKAGES` /
+ * `DELETE_PACKAGES`——这两个权限的 protectionLevel 是 **signature|privileged**：
+ * 只有平台签名应用或 `/system/priv-app` 白名单应用才会被真正授予。
+ * 欢视助手是 TCL 预装系统应用，所以它调 PackageInstaller 时**无需用户确认**。
+ * 普通 sideload 应用永远拿不到这个权限（Android 安全边界，无绕过方案），
+ * 但我们可以**拉起它**让用户借它的手装。
+ *
+ * 识别方式：扫描已安装应用里 `checkPermission(INSTALL_PACKAGES)==GRANTED` 的
+ * 非本应用包（普通应用即使声明了该权限也只会是 DENIED，不会误报）。
+ * 已知优先序：欢视助手在前（TCL 实机验证存在），其余按扫描顺序。
+ * 它没有暴露「装指定 APK」的 intent（VIEW filter 只接 tvhelperdetail 深链），
+ * 所以只能拉起主界面 + Toast 指引用户用「安装包管理/本地安装」找文件。
+ */
+private fun launchPrivilegedInstallerHelper(context: android.content.Context, apkName: String): Boolean {
+    return try {
+        val pm = context.packageManager
+        val self = context.packageName
+        val granted = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+            .filter { info ->
+                info.packageName != self &&
+                    info.requestedPermissions?.contains(
+                        android.Manifest.permission.INSTALL_PACKAGES,
+                    ) == true &&
+                    pm.checkPermission(
+                        android.Manifest.permission.INSTALL_PACKAGES,
+                        info.packageName,
+                    ) == PackageManager.PERMISSION_GRANTED
+            }
+        installLog("持有 INSTALL_PACKAGES 特权的应用：${granted.joinToString { it.packageName }.ifEmpty { "（无）" }}")
+        // 这些虽然持有特权但不是「装本地 APK」的工具：Play 商店只装自家商店内容、
+        // managedprovisioning 是开通流程组件、shell 是调试桥——拉起它们只会让用户困惑
+        //（模拟器实测：不过滤时首个候选就是 Play 商店）。
+        val notHelpers = setOf(
+            "com.android.vending",
+            "com.google.android.gms",
+            "com.android.managedprovisioning",
+            "com.android.shell",
+            "com.google.android.packageinstaller",
+            "com.android.packageinstaller",
+        )
+        val knownFirst = listOf("tv.huan.tvhelper") // TCL 欢视助手
+        val target = granted.firstOrNull { it.packageName in knownFirst && pm.getLaunchIntentForPackage(it.packageName) != null }
+            ?: granted.firstOrNull {
+                it.packageName !in notHelpers &&
+                    pm.getLaunchIntentForPackage(it.packageName) != null
+            }
+            ?: run {
+                installLog("本机没有可拉起的特权安装工具，继续原兜底链")
+                return false
+            }
+        val intent = pm.getLaunchIntentForPackage(target.packageName)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } ?: return false
+        context.startActivity(intent)
+        installLog("已拉起特权安装工具：${target.packageName}，请用户在其内安装 $apkName")
+        Toast.makeText(
+            context,
+            "已打开系统安装工具（欢视助手等）。\n请在其中找「安装包管理 / 本地安装」，安装刚接收的：$apkName",
+            Toast.LENGTH_LONG,
+        ).show()
+        true
+    } catch (t: Throwable) {
+        installLog("拉起特权安装工具失败：${t.javaClass.simpleName}: ${t.message}")
+        false
+    }
+}
+
 private fun fallbackToManualInstall(
     context: android.content.Context,
     item: ReceivedItem,
@@ -1115,6 +1187,11 @@ private fun fallbackToManualInstall(
             ).show()
             return@runCatching
         }
+
+        // ---- ⓪ 优先借道系统特权安装工具（欢视助手等，TCL 实机存在） ----
+        // 这比「让用户拿路径自己去翻文件管理」有效得多：它是 ROM 自带的、
+        // 有 INSTALL_PACKAGES 特权的应用，本就承担装 APK 的职责。
+        if (launchPrivilegedInstallerHelper(context, item.name)) return@runCatching
 
         // ---- ① 接收侧已经标记过降级目录：文件就在那个目录里，别再搬一次 ----
         // ReceiverServer.saveToDownloads 在公共目录不可写时会 markFallbackDir 存下真实路径，
@@ -1667,13 +1744,18 @@ class InstallResultReceiver : android.content.BroadcastReceiver() {
                 context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 android.util.Log.i(INSTALL_TAG, "已拉起系统安装确认界面，等待用户确认")
             } catch (t: Throwable) {
-                // 定制 ROM 可能连系统的确认 activity 都没有——如实上报，不装成功
+                // 定制 ROM 可能连系统的确认 activity 都没有——如实上报，并立即
+                // 借道特权安装工具（欢视助手等）：此时 session 已 commit，
+                // 用户装不装最终取决于工具里能否找到该 APK，不能就此死路。
                 android.util.Log.e(INSTALL_TAG, "拉起确认界面失败", t)
-                Toast.makeText(
-                    context,
-                    "本机无法弹出安装确认界面，请用文件管理/应用中心安装",
-                    Toast.LENGTH_LONG,
-                ).show()
+                installLog("拉起系统确认界面失败，转特权安装工具")
+                if (!launchPrivilegedInstallerHelper(context, "刚接收的 APK")) {
+                    Toast.makeText(
+                        context,
+                        "本机无法弹出安装确认界面，请用文件管理/应用中心安装",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
             return
         }
