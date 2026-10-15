@@ -128,6 +128,7 @@ fn main() {
                 .title("local-sharing")
                 .inner_size(1120.0, 760.0)
                 .min_inner_size(820.0, 560.0)
+                .disable_drag_drop_handler() // 关闭 Tauri 拖拽拦截，让 HTML5 DnD 直接工作
                 .build()
                 .expect("创建主窗口失败");
 

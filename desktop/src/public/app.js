@@ -212,6 +212,10 @@ function renderPicked() {
 $('#targetDevice').addEventListener('change', renderPicked);
 
 // ---- 拖拽 ----
+// 全局兜底：文件拖到投放区之外时阻止 WebView 导航到 file://（Tauri 拖拽拦截已关闭）
+['dragover', 'drop'].forEach((ev) =>
+  document.addEventListener(ev, (e) => e.preventDefault())
+);
 const drop = $('#drop');
 ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
   e.preventDefault(); drop.classList.add('over');
