@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -69,6 +71,19 @@ class MainActivity : ComponentActivity() {
         }
         enableEdgeToEdge()
         setContent {
+            // 传输中屏幕常亮：手机息屏 → doze → Wi-Fi 省电掐断上传 socket，是真机
+            // 「息屏即断连」的根因。电视端 TvReceiverActivity 已有 FLAG_KEEP_SCREEN_ON，
+            // 这里只管手机端发送侧——仅传输中常亮，结束/取消/失败立即还原息屏节奏。
+            // 由 sendState 派生流驱动，覆盖所有状态转换，无需在各转换点手动加/清标志。
+            val uploading by vm.uploading.collectAsState()
+            DisposableEffect(uploading) {
+                if (uploading) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                onDispose { window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            }
             LocalSharingTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
