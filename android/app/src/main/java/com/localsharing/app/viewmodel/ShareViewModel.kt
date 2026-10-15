@@ -669,8 +669,12 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }
-            } catch (e: Exception) {
-                // 网络异常也要落到终态并写历史，否则会留下永久卡在 Running 的死状态
+            } catch (e: Throwable) {
+                // 必须接 Throwable 而非 Exception：若 NoSuchMethodError / LinkageError 等
+                // Error 逃出协程，_sendState 会永久卡在 Running——屏幕常亮不放，且
+                // sendSelected 入口的 Running 守卫直接 return，再也无法发起新传输。
+                // Error 与网络异常走同一条「落终态 + 写失败历史」路径，detail 里
+                // ${e.javaClass.simpleName} 会带上 Error 的实际类名。
                 res = ShareApi.UploadResult(false, "${e.javaClass.simpleName}: ${e.message}")
             }
             val finishedAt = System.currentTimeMillis()
