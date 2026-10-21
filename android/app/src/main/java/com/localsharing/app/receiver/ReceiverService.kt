@@ -150,8 +150,8 @@ class ReceiverService : Service() {
 
     private var server: ReceiverServer? = null
 
-    /** Wi-Fi/以太网网络回调句柄；null = 未注册。onDestroy 时必须反注册，避免泄漏 */
-    private var netCallback: ConnectivityManager.NetworkCallback? = null
+    /** Wi-Fi/以太网网络回调句柄（每 transport 一个独立实例）；空 = 未注册。onDestroy 时必须反注册，避免泄漏 */
+    private var netCallbacks: List<ConnectivityManager.NetworkCallback> = emptyList()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -180,11 +180,16 @@ class ReceiverService : Service() {
      * NetworkCallback 自 API 21 起可用，无 NewApi 风险。
      * 注意：回调线程非主线程，refreshNetworkStatus 内部对 _status 的写依赖
      * MutableStateFlow 的线程安全赋值，已满足。
+     *
+     * ★ WIFI 与 ETHERNET 必须**各用一个 NetworkCallback 实例**：AOSP
+     * （sendRequestForNetwork）以 callback 对象为 key 存表，同一实例注册第二次
+     * 直接抛 IllegalArgumentException("callback is already registered")，
+     * 复用实例会让 ETHERNET 通道静默失效（网线电视收不到任何回调）。
      */
     private fun registerNetworkWatch() {
         unregisterNetworkWatch() // 防重复注册叠加（onCreate 理论只走一次，兜底）
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val cb = object : ConnectivityManager.NetworkCallback() {
+        fun watchCallback() = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 refreshNetworkStatus()
             }
@@ -195,31 +200,35 @@ class ReceiverService : Service() {
             }
         }
         try {
-            // Wi-Fi 与以太网各注册一份请求：电视两类口都可能用
+            // Wi-Fi 与以太网各建各的 callback 实例 + 各注册一份请求：电视两类口都可能用
+            val wifiCb = watchCallback()
+            val ethCb = watchCallback()
             cm.registerNetworkCallback(
                 NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
-                cb,
+                wifiCb,
             )
             cm.registerNetworkCallback(
                 NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build(),
-                cb,
+                ethCb,
             )
-            netCallback = cb
+            netCallbacks = listOf(wifiCb, ethCb)
         } catch (e: Exception) {
             appendLog("[net] 网络监听注册失败：${e.message}")
         }
     }
 
     private fun unregisterNetworkWatch() {
-        netCallback?.let { cb ->
-            try {
-                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                cm.unregisterNetworkCallback(cb)
-            } catch (_: Exception) {
-                // 已注销/服务销毁中的竞态可忽略
+        if (netCallbacks.isNotEmpty()) {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            netCallbacks.forEach { cb ->
+                try {
+                    cm.unregisterNetworkCallback(cb)
+                } catch (_: Exception) {
+                    // 已注销/服务销毁中的竞态可忽略
+                }
             }
         }
-        netCallback = null
+        netCallbacks = emptyList()
     }
 
     private fun startServer() {
