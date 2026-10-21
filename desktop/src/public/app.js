@@ -16,6 +16,9 @@ async function initInfo() {
   connectWs();
   loadActivity();
   loadSettings();
+  // 启动时一次性拉取当前设备列表（后续增量靠 WS 推送，不加轮询）；
+  // 桌面端重启后 devices 注册表为空，靠此调用 + 设备注册回来时的 WS 推送恢复下拉选中态
+  fetch('/api/devices').then((r) => r.json()).then((d) => renderDevices(d.devices)).catch(() => {});
 }
 
 // ---- WebSocket ----
@@ -60,6 +63,17 @@ function renderDevices(devices) {
     </li>`).join('');
   sel.innerHTML = '<option value="">— 请选择 —</option>' +
     devices.map((d) => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+  applyLastDeviceSelection();
+}
+
+// lastDeviceId 命中当前设备列表时自动恢复下拉选中；
+// 悬空时保持空选且不清除 lastDeviceId 值——设备注册回来（WS 推送）后仍能命中
+function applyLastDeviceSelection() {
+  const sel = $('#targetDevice');
+  if (lastDeviceId && sel.querySelector(`option[value="${lastDeviceId}"]`)) {
+    sel.value = lastDeviceId;
+  }
+  renderPicked();
 }
 
 // 设备重命名：写入持久化别名，重连后自动沿用
@@ -92,6 +106,8 @@ async function loadSettings() {
     downloadDir = s.downloadDir || '';
     lastDeviceId = s.lastDeviceId || '';
     $('#downloadDir').textContent = downloadDir || '默认';
+    // 设置加载晚于设备列表时补一次选中态恢复（两处均幂等，以最后到达者为准）
+    applyLastDeviceSelection();
   } catch {
     $('#downloadDir').textContent = '默认';
   }
@@ -276,7 +292,13 @@ async function sendTo(deviceId, okMsg) {
         });
       } catch { /* 记忆失败不致命 */ }
     } else {
-      log('发送失败：' + (data.error || '未知错误'));
+      const errText = data.detail || data.error || '未知错误';
+      // 悬空 lastDeviceId（桌面端重启后设备未注册回来）导致 device_not_found：
+      // toast 明确提示并说明会自动重连，不再只写日志静默失败
+      if (data.error === 'device_not_found' || (data.detail && data.detail.includes('设备未连接'))) {
+        toast('目标设备未连接：请确认对方已打开 local-sharing 接收，稍候会自动重连', false);
+      }
+      log('发送失败：' + errText);
     }
   } catch (e) {
     log('发送失败：' + e.message);

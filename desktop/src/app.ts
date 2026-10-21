@@ -279,7 +279,13 @@ export function buildApp(): express.Express {
         try {
           const deviceId = req.body?.deviceId;
           if (!deviceId || !getDevice(deviceId)) {
-            return res.status(404).json({ error: 'device_not_found' });
+            // lastDeviceId 在桌面端重启后悬空（设备注册表仅存内存），
+            // 保留 settings 中的 lastDeviceId 不清除——设备端打开 app 会自动注册回来并命中。
+            // detail 供前端 toast 明确提示，替代此前只写日志的静默失败。
+            return res.status(404).json({
+              error: 'device_not_found',
+              detail: '设备未连接，请在其端打开接收模式后自动重连，或重新扫码配对',
+            });
           }
           const files = (req.files || []).map((f: any) => ({
             name: decodeFilename(f.originalname),
