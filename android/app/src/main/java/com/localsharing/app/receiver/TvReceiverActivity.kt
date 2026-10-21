@@ -284,6 +284,10 @@ class TvReceiverActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (!ReceiverService.status.value.running) ReceiverService.start(this)
+        // IP 热重验（无条件）：前台服务跨待机存活时 running=true 直接放行，
+        // 隔夜 DHCP 换址会让屏幕上的二维码仍是老 IP。服务未起时（刚 start 未完成）
+        // refreshNetworkStatus 内部 running 检查会空跑，onCreate 会算新 IP，幂等安全。
+        ReceiverService.refreshNetworkStatus()
     }
 }
 

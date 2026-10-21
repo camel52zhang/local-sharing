@@ -6,6 +6,11 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,9 +85,73 @@ class ReceiverService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, ReceiverService::class.java))
         }
+
+        /**
+         * 局域网 IP 热重验（修「隔夜老二维码」）。
+         *
+         * 背景：二维码 IP 只在 startServer() 时算一次，前台服务跨待机存活，
+         * 隔夜 DHCP 换址后屏幕上仍是老 IP，手机扫码/重连全部打空。
+         *
+         * - 仅 running 时执行（服务没起就没二维码可刷新）；
+         * - 结果与当前 lanIp 不同才写 _status（StateFlow 收集端 UI 自动刷新，
+         *   [TvReceiverActivity] 无需改动）；
+         * - lanIp() 返回空（网络瞬断）也照实更新为 ""，界面已有「未连接网络」分支；
+         * - port 不动：NanoHTTPD 绑通配地址，IP 变化无需重启 server。
+         *
+         * 线程安全：NetworkCallback 回调在非主线程，MutableStateFlow.value 赋值本身线程安全。
+         * 调用点：TvReceiverActivity.onResume（覆盖跨待机回来）、NetworkCallback（实时监听）。
+         */
+        fun refreshNetworkStatus() {
+            if (!_status.value.running) return
+            val ip = lanIp()
+            if (ip != _status.value.lanIp) {
+                appendLog("[net] IP 变更：${_status.value.lanIp.ifEmpty { "(无网络)" }} → ${ip.ifEmpty { "(无网络)" }}")
+                _status.value = _status.value.copy(lanIp = ip)
+            }
+        }
+
+        /**
+         * 选择用于展示二维码的局域网 IP。
+         * 电视常有多块网卡（有线 eth0 + 无线 wlan0）以及系统虚拟网卡（p2p0 / dummy / tun / rmnet），
+         * 简单取「第一个非回环 IPv4」可能拿到虚拟网卡地址，导致手机扫码后连不上。
+         * 策略：跳过虚拟/点对点接口，按 wlan > eth > 其它 的优先级取地址。
+         */
+        private fun lanIp(): String {
+            return try {
+                val candidates = mutableListOf<Pair<Int, String>>()
+                val en = java.net.NetworkInterface.getNetworkInterfaces()
+                while (en.hasMoreElements()) {
+                    val n = en.nextElement()
+                    if (!n.isUp || n.isLoopback) continue
+                    val name = (n.name ?: "").lowercase(java.util.Locale.US)
+                    if (name.startsWith("p2p") || name.startsWith("tun") || name.startsWith("rmnet") ||
+                        name.startsWith("ppp") || name.contains("dummy")
+                    ) continue
+                    val priority = when {
+                        name.startsWith("wlan") -> 0
+                        name.startsWith("eth") -> 1
+                        else -> 2
+                    }
+                    val addrs = n.inetAddresses
+                    while (addrs.hasMoreElements()) {
+                        val a = addrs.nextElement()
+                        if (!a.isLoopbackAddress && a is java.net.Inet4Address) {
+                            val host = a.hostAddress ?: continue
+                            candidates += priority to host
+                        }
+                    }
+                }
+                candidates.minByOrNull { it.first }?.second ?: ""
+            } catch (e: Exception) {
+                ""
+            }
+        }
     }
 
     private var server: ReceiverServer? = null
+
+    /** Wi-Fi/以太网网络回调句柄；null = 未注册。onDestroy 时必须反注册，避免泄漏 */
+    private var netCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -91,16 +160,66 @@ class ReceiverService : Service() {
         createChannel()
         startForeground(NOTIF_ID, buildNotification("启动中…"))
         startServer()
+        registerNetworkWatch()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
         START_STICKY
 
     override fun onDestroy() {
+        unregisterNetworkWatch()
         server?.stop()
         server = null
         _status.value = _status.value.copy(running = false)
         super.onDestroy()
+    }
+
+    /**
+     * 实时监听 Wi-Fi / 以太网变化（连上、断开、换网、IP 更新都会走到回调），
+     * 触发 [refreshNetworkStatus] 热重验 IP —— 不等用户回到前台，二维码即时纠正。
+     * NetworkCallback 自 API 21 起可用，无 NewApi 风险。
+     * 注意：回调线程非主线程，refreshNetworkStatus 内部对 _status 的写依赖
+     * MutableStateFlow 的线程安全赋值，已满足。
+     */
+    private fun registerNetworkWatch() {
+        unregisterNetworkWatch() // 防重复注册叠加（onCreate 理论只走一次，兜底）
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                refreshNetworkStatus()
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, lp: LinkProperties) {
+                // DHCP 续租/换址只走这里，不会触发 onAvailable，必须一并监听
+                refreshNetworkStatus()
+            }
+        }
+        try {
+            // Wi-Fi 与以太网各注册一份请求：电视两类口都可能用
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),
+                cb,
+            )
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).build(),
+                cb,
+            )
+            netCallback = cb
+        } catch (e: Exception) {
+            appendLog("[net] 网络监听注册失败：${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkWatch() {
+        netCallback?.let { cb ->
+            try {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                cm.unregisterNetworkCallback(cb)
+            } catch (_: Exception) {
+                // 已注销/服务销毁中的竞态可忽略
+            }
+        }
+        netCallback = null
     }
 
     private fun startServer() {
@@ -150,40 +269,8 @@ class ReceiverService : Service() {
 
     /**
      * 选择用于展示二维码的局域网 IP。
-     * 电视常有多块网卡（有线 eth0 + 无线 wlan0）以及系统虚拟网卡（p2p0 / dummy / tun / rmnet），
-     * 简单取「第一个非回环 IPv4」可能拿到虚拟网卡地址，导致手机扫码后连不上。
-     * 策略：跳过虚拟/点对点接口，按 wlan > eth > 其它 的优先级取地址。
+     * （实现已上移到 companion 的 [lanIp]，二维码路径与 IP 重验共用同一套枚举逻辑）
      */
-    private fun lanIp(): String {
-        return try {
-            val candidates = mutableListOf<Pair<Int, String>>()
-            val en = java.net.NetworkInterface.getNetworkInterfaces()
-            while (en.hasMoreElements()) {
-                val n = en.nextElement()
-                if (!n.isUp || n.isLoopback) continue
-                val name = (n.name ?: "").lowercase(java.util.Locale.US)
-                if (name.startsWith("p2p") || name.startsWith("tun") || name.startsWith("rmnet") ||
-                    name.startsWith("ppp") || name.contains("dummy")
-                ) continue
-                val priority = when {
-                    name.startsWith("wlan") -> 0
-                    name.startsWith("eth") -> 1
-                    else -> 2
-                }
-                val addrs = n.inetAddresses
-                while (addrs.hasMoreElements()) {
-                    val a = addrs.nextElement()
-                    if (!a.isLoopbackAddress && a is java.net.Inet4Address) {
-                        val host = a.hostAddress ?: continue
-                        candidates += priority to host
-                    }
-                }
-            }
-            candidates.minByOrNull { it.first }?.second ?: ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
 
     private fun createChannel() {
         // 注意：必须用 getSystemService(String) 这个 API 1 写法。

@@ -80,6 +80,7 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
     val incoming by vm.incoming.collectAsState()
     val saved by vm.saved.collectAsState()
     val conn by vm.connState.collectAsState()
+    val session by vm.activeSession.collectAsState()
     val pending by vm.pendingShare.collectAsState()
     val autoSave by vm.autoSave.collectAsState()
     val saveDirName by vm.saveDirName.collectAsState()
@@ -284,6 +285,19 @@ fun HomeScreen(vm: ShareViewModel, onOpenPicker: () -> Unit, onOpenHistory: () -
                     reconnecting = conn == ConnState.Reconnecting,
                     label = targetLabel,
                 )
+            }
+
+            // 连接失败/过期原因（方案 B：restoreOnly 静默设计的展示出口）。
+            // fail()/过期路径把原因写进 session.lastError；已连接时不显示，避免噪音
+            if (conn != ConnState.Connected && !session?.lastError.isNullOrBlank()) {
+                item {
+                    Text(
+                        session?.lastError.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
 
             // ---- 发送区：选文件 → 选目标 → 发送（自上而下，PRD 关键布局约束）----

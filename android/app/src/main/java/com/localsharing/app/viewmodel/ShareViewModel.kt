@@ -51,6 +51,13 @@ sealed class ConnState {
 }
 
 /**
+ * 方案 B 会话有效期：距上次成功连通（SenderDevice.lastOkAt）超过此时长、
+ * 且当前 WS 未连接，视为地址已失效（电视换网/换机），停止自动重连，要求重扫。
+ * WS 在线/传输中永不过期。
+ */
+private const val SESSION_TTL_MS = 4 * 60 * 60 * 1000L
+
+/**
  * 同名设备去重确认的待决状态（PRD R3 / D2）。
  *
  * 两台同型号电视的 `/api/info.name` 完全相同，自动合并会丢设备、
@@ -193,11 +200,42 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         reloadDevices()
         // 恢复上次的目标：静默尝试，失败也不打扰用户（设备可能已关机）
         val last = _devices.value.firstOrNull()
-        if (last != null) connectDevice(last.id, restoreOnly = true)
+        if (last != null) {
+            if (isSessionExpired(last)) {
+                // 方案 B：距上次成功连通已超 4h → 地址大概率已失效（电视换网/换机），
+                // 不做静默重连轰炸。置 Disconnected + lastError 提示；
+                // restoreOnly 保持静默设计：不走 _error 全局弹窗，提示只落会话。
+                // 仍把该设备置为 active：用户打开 App 应看到「上一台设备 + 过期提示」，
+                // 而不是被打回设备列表。
+                _activeDeviceId.value = last.id
+                updateSession(last.id) {
+                    DeviceSession(
+                        last.id, last.baseUrl, "", "", "",
+                        ConnState.Disconnected, "连接已过期，请重新扫码",
+                    )
+                }
+            } else {
+                connectDevice(last.id, restoreOnly = true)
+            }
+        }
         // 传输历史是常写流水（读文件 + JSONArray 解析），必须在 IO 线程
         viewModelScope.launch(Dispatchers.IO) {
             _history.value = TransferHistoryStore.load(appCtx)
         }
+    }
+
+    /**
+     * 方案 B 过期判据（严格语义）：**「当前 WS 未连接 且 now - 该设备 lastOkAt >
+     * [SESSION_TTL_MS]」才过期**。
+     * - WS 在线（Connected）或传输中（Running）永不过期；
+     * - lastOkAt <= 0 = 从未成功连通（见 SenderDeviceCodec 注释），交由正常连接
+     *   流程处理，不算过期（扫了没连成的设备仍应给 connectDevice 自愈机会）。
+     */
+    private fun isSessionExpired(device: SenderDevice): Boolean {
+        if (_sessions.value[device.id]?.state == ConnState.Connected) return false
+        if (_sendState.value is SendState.Running) return false
+        if (device.lastOkAt <= 0L) return false
+        return System.currentTimeMillis() - device.lastOkAt > SESSION_TTL_MS
     }
 
     private fun reloadDevices() {
@@ -492,6 +530,19 @@ class ShareViewModel(app: Application) : AndroidViewModel(app) {
         if (deviceId != _activeDeviceId.value) return
         if (gen != connGen.get()) return
         if (reconnectJobs[deviceId]?.isActive == true) return // 已在重连中，不重复起
+        // 方案 B：进入重连循环前查过期判据——距上次成功连通已超 4h 且 WS 已断，
+        // 视为地址失效（隔夜待机后接收端换网/换机），不再无限重试轰炸。
+        // 探测可达的自愈通道在 connectDevice/markReachable，用户重扫或手动连接即可纠正。
+        val expiredDevice = _devices.value.firstOrNull { it.id == deviceId }
+        if (expiredDevice != null && isSessionExpired(expiredDevice)) {
+            updateSession(deviceId) {
+                it?.copy(
+                    state = ConnState.Disconnected,
+                    lastError = "设备不可达，请检查接收端已开机，或重新扫码",
+                )
+            }
+            return
+        }
         updateSession(deviceId) { it?.copy(state = ConnState.Reconnecting) }
 
         val job = viewModelScope.launch {
